@@ -1,7 +1,7 @@
 {
 	"name": "obsidian-system-recording",
-	"version": "1.0.0",
-	"description": "Record system audio (Zoom, Meet, Teams) and save as M4A in your vault",
+	"version": "1.0.1",
+	"description": "Record system audio (Zoom, Meet, Teams) and microphone, saving the mix as a WAV file in your vault.",
 	"main": "main.js",
 	"type": "module",
 	"scripts": {

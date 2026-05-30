@@ -1,6 +1,7 @@
 import { ChildProcess, spawn } from "child_process";
 import * as path from "path";
 import * as fs from "fs";
+import * as os from "os";
 import { Plugin, Platform } from "obsidian";
 
 export interface RecorderStatus {
@@ -39,7 +40,7 @@ export class Recorder {
 
         const binaryPath = this.getBinaryPath(plugin);
         const stopFile = path.join(
-            require("os").tmpdir(),
+            os.tmpdir(),
             `system-recorder-stop-${Date.now()}`
         );
         this.stopFilePath = stopFile;

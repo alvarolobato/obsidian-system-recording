@@ -2,8 +2,9 @@
     display: none;
 }
 
-.is-recording {
-    color: var(--text-error) !important;
+.side-dock-ribbon-action.is-recording,
+.clickable-icon.is-recording {
+    color: var(--text-error);
     animation: recording-pulse 1.5s ease-in-out infinite;
 }
 

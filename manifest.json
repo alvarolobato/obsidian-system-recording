@@ -1,9 +1,9 @@
 {
     "id": "system-recording",
     "name": "System Recording",
-    "version": "1.0.0",
+    "version": "1.0.1",
     "minAppVersion": "0.15.0",
-    "description": "Record system audio (Zoom, Meet, Teams) and save as M4A in your vault",
+    "description": "Record system audio (Zoom, Meet, Teams) and microphone, saving the mix as a WAV file in your vault.",
     "author": "s32747",
     "isDesktopOnly": true
 }
