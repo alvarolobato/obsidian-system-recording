@@ -1,0 +1,111 @@
+import { describe, it, expect, vi } from "vitest";
+import { BinaryProvisioner, ProvisionerDeps, releaseUrl } from "./binary";
+
+const VALID = "validhash";
+const BIN = "/plugin/system-recorder";
+const VERSION = "1.0.2";
+
+function makeDeps(overrides: Partial<ProvisionerDeps> = {}): ProvisionerDeps {
+	return {
+		arch: () => "arm64",
+		fileExists: async () => false,
+		readFile: async () => Buffer.from("existing"),
+		writeFile: async () => undefined,
+		chmod: async () => undefined,
+		rename: async () => undefined,
+		download: async () => Buffer.from("downloaded"),
+		sha256: () => VALID,
+		...overrides,
+	};
+}
+
+describe("BinaryProvisioner", () => {
+	it("returns the path without downloading when the existing hash matches", async () => {
+		const download = vi.fn(async () => Buffer.from("x"));
+		const deps = makeDeps({ fileExists: async () => true, sha256: () => VALID, download });
+		await expect(new BinaryProvisioner(deps, VALID).ensure(BIN, VERSION)).resolves.toBe(BIN);
+		expect(download).not.toHaveBeenCalled();
+	});
+
+	it("downloads, verifies, chmods, and renames when the binary is missing", async () => {
+		const calls: string[] = [];
+		const deps = makeDeps({
+			fileExists: async () => false,
+			download: async (url) => { calls.push(`download:${url}`); return Buffer.from("bin"); },
+			sha256: () => VALID,
+			writeFile: async (p) => { calls.push(`write:${p}`); },
+			chmod: async (p, m) => { calls.push(`chmod:${p}:${m}`); },
+			rename: async (from, to) => { calls.push(`rename:${from}->${to}`); },
+		});
+		await expect(new BinaryProvisioner(deps, VALID).ensure(BIN, VERSION)).resolves.toBe(BIN);
+		expect(calls).toEqual([
+			`download:${releaseUrl(VERSION)}`,
+			`write:${BIN}.tmp`,
+			`chmod:${BIN}.tmp:${0o755}`,
+			`rename:${BIN}.tmp->${BIN}`,
+		]);
+	});
+
+	it("re-downloads when the existing binary hash does not match", async () => {
+		const download = vi.fn(async () => Buffer.from("new"));
+		let n = 0;
+		const deps = makeDeps({
+			fileExists: async () => true,
+			sha256: () => (n++ === 0 ? "old" : VALID),
+			download,
+		});
+		await expect(new BinaryProvisioner(deps, VALID).ensure(BIN, VERSION)).resolves.toBe(BIN);
+		expect(download).toHaveBeenCalledOnce();
+	});
+
+	it("throws and does not install when the download fails verification", async () => {
+		const writeFile = vi.fn(async () => undefined);
+		const chmod = vi.fn(async () => undefined);
+		const rename = vi.fn(async () => undefined);
+		const deps = makeDeps({ fileExists: async () => false, sha256: () => "wrong", writeFile, chmod, rename });
+		await expect(new BinaryProvisioner(deps, VALID).ensure(BIN, VERSION)).rejects.toThrow("failed verification");
+		expect(writeFile).not.toHaveBeenCalled();
+		expect(chmod).not.toHaveBeenCalled();
+		expect(rename).not.toHaveBeenCalled();
+	});
+
+	it("throws on non-arm64 before any fs or network access", async () => {
+		const fileExists = vi.fn(async () => true);
+		const download = vi.fn(async () => Buffer.from("x"));
+		const deps = makeDeps({ arch: () => "x64", fileExists, download });
+		await expect(new BinaryProvisioner(deps, VALID).ensure(BIN, VERSION)).rejects.toThrow("Apple Silicon");
+		expect(fileExists).not.toHaveBeenCalled();
+		expect(download).not.toHaveBeenCalled();
+	});
+
+	it("wraps download errors with a friendly message", async () => {
+		const deps = makeDeps({
+			fileExists: async () => false,
+			download: async () => { throw new Error("HTTP 404"); },
+		});
+		await expect(new BinaryProvisioner(deps, VALID).ensure(BIN, VERSION))
+			.rejects.toThrow("Failed to download the recorder helper: HTTP 404");
+	});
+
+	it("invokes onDownloadStart only when a download occurs", async () => {
+		const cb = vi.fn();
+		await new BinaryProvisioner(makeDeps({ fileExists: async () => true, sha256: () => VALID }), VALID)
+			.ensure(BIN, VERSION, cb);
+		expect(cb).not.toHaveBeenCalled();
+		await new BinaryProvisioner(makeDeps({ fileExists: async () => false, sha256: () => VALID }), VALID)
+			.ensure(BIN, VERSION, cb);
+		expect(cb).toHaveBeenCalledOnce();
+	});
+
+	it("dedupes concurrent ensure calls into a single download", async () => {
+		let downloads = 0;
+		const deps = makeDeps({
+			fileExists: async () => false,
+			download: async () => { downloads++; await new Promise((r) => setTimeout(r, 5)); return Buffer.from("x"); },
+			sha256: () => VALID,
+		});
+		const p = new BinaryProvisioner(deps, VALID);
+		await Promise.all([p.ensure(BIN, VERSION), p.ensure(BIN, VERSION)]);
+		expect(downloads).toBe(1);
+	});
+});
