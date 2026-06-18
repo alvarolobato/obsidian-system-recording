@@ -8,6 +8,11 @@ import { Recorder, RecorderStatus } from "./recorder";
 import { BinaryProvisioner } from "./binary";
 import { nodeDeps, resolveBinaryPath } from "./binary-runtime";
 import * as path from "path";
+import { GoogleOAuth } from "./auth/googleOAuth";
+import { listEvents } from "./calendar/googleCalendar";
+import { shouldRecord, parseKeywords } from "./calendar/eventFilter";
+import { CalendarScheduler, ScheduledEvent } from "./calendar/scheduler";
+import { actionNotice } from "./ui/actionNotice";
 
 export default class SystemRecordingPlugin extends Plugin {
     settings: SystemRecordingSettings;
@@ -18,6 +23,19 @@ export default class SystemRecordingPlugin extends Plugin {
     private durationInterval: number | null = null;
     private recordingStartTime: number | null = null;
     private ribbonIconEl: HTMLElement | null = null;
+	private oauth = new GoogleOAuth({
+		getCredentials: () => {
+			const id = this.settings.googleClientId.trim();
+			const secret = this.settings.googleClientSecret.trim();
+			return id && secret ? { client_id: id, client_secret: secret } : null;
+		},
+		getTokens: () => this.settings.googleTokens,
+		setTokens: async (tokens) => {
+			this.settings.googleTokens = tokens;
+			await this.saveSettings();
+		},
+	});
+	private scheduler: CalendarScheduler | null = null;
 
     async onload() {
         await this.loadSettings();
@@ -49,11 +67,35 @@ export default class SystemRecordingPlugin extends Plugin {
         // Settings tab
         this.addSettingTab(new SystemRecordingSettingTab(this.app, this));
 
+		this.addCommand({
+			id: "authenticate-google-calendar",
+			// eslint-disable-next-line obsidianmd/ui/sentence-case
+			name: "Authenticate Google Calendar",
+			callback: () => void this.authenticateCalendar(),
+		});
+
+		this.addCommand({
+			id: "toggle-calendar-auto-recording",
+			name: "Toggle calendar auto-recording",
+			callback: async () => {
+				this.settings.calendarAutoRecord = !this.settings.calendarAutoRecord;
+				await this.saveSettings();
+				this.updateScheduler();
+				new Notice(
+					this.settings.calendarAutoRecord
+						? "カレンダー自動録音: ON"
+						: "カレンダー自動録音: OFF"
+				);
+			},
+		});
+
         // Recorder callbacks
         this.recorder.onStatus = (status: RecorderStatus) =>
             this.handleStatus(status);
         this.recorder.onError = (message: string) =>
             new Notice(`Recording error: ${message}`);
+
+		this.updateScheduler();
     }
 
     onunload() {
@@ -61,6 +103,7 @@ export default class SystemRecordingPlugin extends Plugin {
             this.recorder.stop();
         }
         this.clearDurationTimer();
+		this.scheduler?.stop();
     }
 
     async loadSettings() {
@@ -152,6 +195,78 @@ export default class SystemRecordingPlugin extends Plugin {
         this.recorder.stop();
         new Notice("Stopping recording...");
     }
+
+	// MARK: - Calendar integration
+
+	isCalendarAuthenticated(): boolean {
+		return this.oauth.isAuthenticated();
+	}
+
+	async authenticateCalendar(): Promise<void> {
+		try {
+			await this.oauth.authenticate();
+			this.updateScheduler();
+		} catch (e) {
+			new Notice(e instanceof Error ? e.message : String(e));
+		}
+	}
+
+	/** Starts the scheduler when auto-record is on and authenticated; stops it otherwise. */
+	updateScheduler(): void {
+		const shouldRun =
+			this.settings.calendarAutoRecord && this.oauth.isAuthenticated();
+		if (shouldRun) {
+			if (!this.scheduler) {
+				this.scheduler = new CalendarScheduler({
+					now: () => Date.now(),
+					fetchEvents: (minMs, maxMs) => this.fetchCalendarEvents(minMs, maxMs),
+					onEventStart: (event) => this.handleEventStart(event),
+					onEventEnd: (event) => this.handleEventEnd(event),
+					onError: (message) => new Notice(`Calendar error: ${message}`),
+				});
+			}
+			if (!this.scheduler.isRunning) this.scheduler.start();
+		} else {
+			this.scheduler?.stop();
+		}
+	}
+
+	private async fetchCalendarEvents(
+		minMs: number,
+		maxMs: number
+	): Promise<ScheduledEvent[]> {
+		const events = await listEvents(
+			this.oauth,
+			this.settings.calendarId,
+			new Date(minMs),
+			new Date(maxMs)
+		);
+		const keywords = parseKeywords(this.settings.exclusionKeywords);
+		return events
+			.filter((e) => shouldRecord({ summary: e.summary, allDay: e.allDay }, keywords))
+			.map((e) => ({
+				id: e.id,
+				summary: e.summary,
+				start: e.start.getTime(),
+				end: e.end.getTime(),
+				meetLink: e.meetLink,
+			}));
+	}
+
+	private handleEventStart(event: ScheduledEvent): void {
+		if (event.meetLink && this.settings.openMeetAutomatically) {
+			window.open(event.meetLink, "_blank");
+		}
+		actionNotice(`「${event.summary}」が始まりました`, "録音開始", () => {
+			void this.startRecording();
+		});
+	}
+
+	private handleEventEnd(event: ScheduledEvent): void {
+		actionNotice(`「${event.summary}」が終了しました`, "録音停止", () => {
+			this.stopRecording();
+		});
+	}
 
     // MARK: - Status handling
 
