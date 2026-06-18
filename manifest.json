@@ -1,9 +1,9 @@
 {
-    "id": "system-recording",
-    "name": "System Recording",
-    "version": "1.0.2",
-    "minAppVersion": "0.15.0",
-    "description": "Record system audio (Zoom, Meet, Teams) and microphone, saving the mix as a WAV file in your vault.",
-    "author": "Yuto Takagi",
-    "isDesktopOnly": true
+	"id": "system-recording",
+	"name": "System Recording",
+	"version": "1.0.3",
+	"minAppVersion": "0.15.0",
+	"description": "Record system audio (Zoom, Meet, Teams) and microphone, saving the mix as a WAV file in your vault.",
+	"author": "Yuto Takagi",
+	"isDesktopOnly": true
 }
