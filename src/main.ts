@@ -254,7 +254,13 @@ export default class SystemRecordingPlugin extends Plugin {
 	}
 
 	private handleEventStart(event: ScheduledEvent): void {
-		if (event.meetLink && this.settings.openMeetAutomatically) {
+		// Only open https links — meetLink comes from external calendar data,
+		// so guard against javascript:/file:/custom-scheme URIs.
+		if (
+			event.meetLink &&
+			this.settings.openMeetAutomatically &&
+			event.meetLink.startsWith("https://")
+		) {
 			window.open(event.meetLink, "_blank");
 		}
 		actionNotice(`「${event.summary}」が始まりました`, "録音開始", () => {

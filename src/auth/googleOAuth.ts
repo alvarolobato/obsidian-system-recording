@@ -177,7 +177,7 @@ function startLoopbackServer(expectedState: string): Promise<LoopbackResult> {
 				const q = parsed.query;
 				if (q.error) {
 					res.writeHead(400, { "Content-Type": "text/html; charset=utf-8" });
-					res.end(`<h1>OAuth エラー</h1><p>${String(q.error)}</p>`);
+					res.end(`<h1>OAuth エラー</h1><p>${escapeHtml(String(q.error))}</p>`);
 					rejectCode(new Error(`OAuth error: ${String(q.error)}`));
 					return;
 				}
@@ -239,4 +239,13 @@ function base64UrlEncode(bytes: Uint8Array): string {
 	let s = "";
 	for (let i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i] ?? 0);
 	return btoa(s).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+function escapeHtml(s: string): string {
+	return s
+		.replace(/&/g, "&amp;")
+		.replace(/</g, "&lt;")
+		.replace(/>/g, "&gt;")
+		.replace(/"/g, "&quot;")
+		.replace(/'/g, "&#39;");
 }
