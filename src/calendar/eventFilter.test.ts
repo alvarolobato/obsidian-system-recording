@@ -62,7 +62,7 @@ describe("isMeetingEventType", () => {
 
 describe("parseKeywords", () => {
 	it("splits on newlines and commas and trims, dropping blanks", () => {
-		expect(parseKeywords("lunch, 1on1\n  break \n\n,休憩")).toEqual(["lunch", "1on1", "break", "休憩"]);
+		expect(parseKeywords("lunch, 1on1\n  break \n\n,standup")).toEqual(["lunch", "1on1", "break", "standup"]);
 	});
 
 	it("returns an empty array for empty input", () => {
