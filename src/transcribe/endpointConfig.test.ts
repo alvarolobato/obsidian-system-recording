@@ -1,9 +1,15 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { getTranscribeBaseUrl, setTranscribeBaseUrl } from "./endpointConfig";
+import {
+	getTranscribeBaseUrl,
+	getTranscribeModelOverride,
+	setTranscribeBaseUrl,
+	setTranscribeModelOverride,
+} from "./endpointConfig";
 
 afterEach(() => {
-	// Reset to the default so tests don't leak state.
+	// Reset to the defaults so tests don't leak state.
 	setTranscribeBaseUrl("https://api.openai.com/v1");
+	setTranscribeModelOverride("");
 });
 
 describe("endpointConfig", () => {
@@ -24,5 +30,14 @@ describe("endpointConfig", () => {
 	it("falls back to the default for an empty value", () => {
 		setTranscribeBaseUrl("");
 		expect(getTranscribeBaseUrl()).toBe("https://api.openai.com/v1");
+	});
+
+	it("defaults the model override to empty", () => {
+		expect(getTranscribeModelOverride()).toBe("");
+	});
+
+	it("stores and trims a model override", () => {
+		setTranscribeModelOverride("  llm-gateway/whisper  ");
+		expect(getTranscribeModelOverride()).toBe("llm-gateway/whisper");
 	});
 });

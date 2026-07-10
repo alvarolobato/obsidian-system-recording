@@ -1,6 +1,7 @@
 import { FileSystemAdapter, MarkdownView, Menu, normalizePath, Notice, Platform, Plugin, setIcon, TFile } from "obsidian";
 import {
     DEFAULT_SETTINGS,
+    STT_MODELS,
     SystemRecordingSettings,
     SystemRecordingSettingTab,
 } from "./settings";
@@ -264,6 +265,11 @@ export default class SystemRecordingPlugin extends Plugin {
         }
         if (raw?.enrichApiKey && !this.settings.apiKey) {
             this.settings.apiKey = raw.enrichApiKey;
+        }
+        // Guard against corrupt/old data selecting an unknown STT model, which
+        // would silently fall through to the GPT-4o path in the engine.
+        if (!(STT_MODELS as readonly string[]).includes(this.settings.sttModel)) {
+            this.settings.sttModel = DEFAULT_SETTINGS.sttModel;
         }
     }
 
@@ -722,7 +728,7 @@ export default class SystemRecordingPlugin extends Plugin {
         await this.app.workspace.getLeaf(false).openFile(m.recording);
     }
 
-    /** Opens the recording, then hands off to the AI Transcriber plugin if present. */
+    /** Transcribes the meeting's recording with the built-in engine. */
     private async transcribeRecording(m: AgendaMeeting): Promise<void> {
         if (!m.recording) {
             new Notice(t().agenda.notices.noRecording);
@@ -795,7 +801,13 @@ export default class SystemRecordingPlugin extends Plugin {
             }
         } catch (e) {
             const msg = e instanceof Error ? e.message : String(e);
-            new Notice(t().notices.transcribeError(msg));
+            // The engine throws the partial text (marker-prefixed) for a
+            // partial/failed run rather than returning it, so classify it.
+            if (isPartialTranscript(msg)) {
+                new Notice(t().notices.transcribePartial);
+            } else {
+                new Notice(t().notices.transcribeError(msg));
+            }
             this.setActionStatus(t().statusBar.transcribeFailed, "error");
         } finally {
             this.transcribingPaths.delete(recording.path);

@@ -143,11 +143,11 @@ export const en = {
 		},
 		insertTranscript: {
 			name: "Insert transcript into meeting note",
-			desc: "When AI Transcriber finishes, write the transcript into the matching meeting note's ## Transcript section and mark it transcribed.",
+			desc: "When transcription finishes, write the transcript into the matching meeting note's collapsible transcript section and mark it transcribed.",
 		},
 		autoTranscribe: {
 			name: "Auto-transcribe when recording stops",
-			desc: "When a meeting recording finishes, transcribe it automatically (no dialog) and add the transcript to the meeting note. Requires the AI Transcriber plugin with an API key configured.",
+			desc: "When a meeting recording finishes, transcribe it automatically (no dialog) and add the transcript to the meeting note. Requires the shared AI endpoint (base URL + API key) above.",
 		},
 		retentionDays: {
 			name: "Recording retention (days)",
@@ -227,13 +227,13 @@ export const en = {
 			server: "Server-side (recommended)",
 			disabled: "Disabled",
 		},
-		postProcessing: {
-			name: "AI post-processing",
-			desc: "Clean up filler words and repetitions with the model after transcription.",
-		},
 		dictionaryCorrection: {
 			name: "Custom dictionary correction",
-			desc: "Apply the rules below to fix misheard names and terms.",
+			desc: "Apply the rules below to fix misheard names and terms after transcription.",
+		},
+		postProcessing: {
+			name: "GPT-assisted dictionary correction",
+			desc: "Use the model (instead of plain find-and-replace) to apply the dictionary more intelligently. Requires 'Custom dictionary correction' above.",
 		},
 		dictionary: {
 			name: "Dictionary",

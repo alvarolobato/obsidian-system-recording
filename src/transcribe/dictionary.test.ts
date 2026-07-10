@@ -8,11 +8,13 @@ describe("parseDictionary", () => {
 		expect(d.ja.definiteCorrections).toEqual([]);
 	});
 
-	it("parses a single rule", () => {
+	it("parses a single rule into every language bucket", () => {
 		const d = parseDictionary("elastic search => Elasticsearch");
-		expect(d.en.definiteCorrections).toEqual([
-			{ from: ["elastic search"], to: "Elasticsearch" },
-		]);
+		const rule = { from: ["elastic search"], to: "Elasticsearch" };
+		expect(d.en.definiteCorrections).toEqual([rule]);
+		expect(d.ja.definiteCorrections).toEqual([rule]);
+		expect(d.zh.definiteCorrections).toEqual([rule]);
+		expect(d.ko.definiteCorrections).toEqual([rule]);
 	});
 
 	it("supports multiple source spellings for one target", () => {

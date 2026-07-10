@@ -336,18 +336,6 @@ export class SystemRecordingSettingTab extends PluginSettingTab {
 			);
 
 		new Setting(containerEl)
-			.setName(s.settings.postProcessing.name)
-			.setDesc(s.settings.postProcessing.desc)
-			.addToggle((toggle) =>
-				toggle
-					.setValue(this.plugin.settings.postProcessingEnabled)
-					.onChange(async (value) => {
-						this.plugin.settings.postProcessingEnabled = value;
-						await this.plugin.saveSettings();
-					})
-			);
-
-		new Setting(containerEl)
 			.setName(s.settings.dictionaryCorrection.name)
 			.setDesc(s.settings.dictionaryCorrection.desc)
 			.addToggle((toggle) =>
@@ -373,6 +361,18 @@ export class SystemRecordingSettingTab extends PluginSettingTab {
 				ta.inputEl.rows = 4;
 				ta.inputEl.addClass("meeting-copilot-template-input");
 			});
+
+		new Setting(containerEl)
+			.setName(s.settings.postProcessing.name)
+			.setDesc(s.settings.postProcessing.desc)
+			.addToggle((toggle) =>
+				toggle
+					.setValue(this.plugin.settings.postProcessingEnabled)
+					.onChange(async (value) => {
+						this.plugin.settings.postProcessingEnabled = value;
+						await this.plugin.saveSettings();
+					})
+			);
 
 		new Setting(containerEl)
 			.setName(s.settings.autoTranscribe.name)
