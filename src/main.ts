@@ -83,6 +83,8 @@ export default class SystemRecordingPlugin extends Plugin {
 	private currentMeetingNotePath: string | null = null;
 	/** Calendar event id of the in-progress meeting recording, for agenda state. */
 	private currentRecordingEventId: string | null = null;
+	/** Vault-relative path of the in-progress recording, protected from retention. */
+	private currentRecordingPath: string | null = null;
 	/** Note paths currently being enriched, to prevent overlapping LLM runs. */
 	private enrichingPaths = new Set<string>();
 	/** One-shot startup retention sweep, cleared on unload. */
@@ -328,6 +330,7 @@ export default class SystemRecordingPlugin extends Plugin {
                 this.currentRecordingEventId = null;
             }
 
+            this.currentRecordingPath = relativePath;
             const vaultBasePath =
                 adapter instanceof FileSystemAdapter ? adapter.getBasePath() : "";
             const absolutePath = path.join(vaultBasePath, relativePath);
@@ -834,6 +837,7 @@ export default class SystemRecordingPlugin extends Plugin {
     private resetRecordingUi() {
         this.clearDurationTimer();
         this.updateRibbonIcon(false);
+        this.currentRecordingPath = null;
         this.hideStatusBar();
         this.currentMeetingNotePath = null;
         this.currentRecordingEventId = null;
@@ -1090,15 +1094,28 @@ export default class SystemRecordingPlugin extends Plugin {
             folders: [this.settings.meetingsFolder, this.settings.recordingFolder],
             retentionDays: this.settings.retentionDays,
             now: Date.now(),
+            protectedPaths: this.currentRecordingPath
+                ? new Set([this.currentRecordingPath])
+                : undefined,
         });
 
         let removed = 0;
         for (const info of expired) {
             const file = this.app.vault.getAbstractFileByPath(info.path);
             if (!(file instanceof TFile)) continue;
+            // Drop the note's link to the audio before trashing so it doesn't
+            // dangle; the transcript already lives in the note.
+            const note = findMeetingNoteForAudio(this.app, file);
             try {
                 await this.app.fileManager.trashFile(file);
                 removed++;
+                if (note) {
+                    await this.app.fileManager.processFrontMatter(note, (fm) => {
+                        const f = fm as Record<string, unknown>;
+                        delete f.recording;
+                        f.recording_pruned = new Date().toISOString().slice(0, 10);
+                    });
+                }
             } catch (e) {
                 console.warn(
                     `[Meeting Copilot] failed to trash ${info.path}`,
@@ -1165,6 +1182,7 @@ export default class SystemRecordingPlugin extends Plugin {
         const notePath = this.currentMeetingNotePath;
         this.currentMeetingNotePath = null;
         this.currentRecordingEventId = null;
+        this.currentRecordingPath = null;
         this.agendaEvents.emit("changed", undefined);
         if (notePath) {
             const file = this.app.vault.getAbstractFileByPath(notePath);

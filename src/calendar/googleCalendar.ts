@@ -40,6 +40,7 @@ interface RawAttendee {
 interface RawEvent extends RawConferenceEvent {
 	id?: string;
 	summary?: string;
+	status?: string;
 	eventType?: string;
 	location?: string;
 	description?: string;
@@ -103,6 +104,7 @@ export async function listEvents(
 	const url = `${API}/calendars/${encodeURIComponent(calendarId)}/events?${params}`;
 	const json = (await authedGet(oauth, url)) as { items?: RawEvent[] };
 	return (json.items ?? [])
+		.filter((ev) => ev.status !== "cancelled") // drop cancelled meetings
 		.filter((ev) => isMeetingEventType(ev.eventType))
 		.filter((ev) => !ev.start?.date) // drop all-day events (date-only start)
 		.filter((ev) => !matchesExclusionKeyword(ev.summary ?? "", exclusionKeywords))
