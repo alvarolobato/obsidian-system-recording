@@ -32,5 +32,8 @@ export default tseslint.config(
 		"versions.json",
 		"main.js",
 		"vitest.config.ts",
+		// Vendored transcription engine (upstream MIT, kept pristine except the
+		// documented endpoint patches). Not subject to our lint rules.
+		"src/transcribe/vendor/**",
 	]),
 );

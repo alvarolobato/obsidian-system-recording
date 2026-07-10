@@ -53,6 +53,41 @@ Meetings Plus is distributed under the 0BSD license, which imposes no
 attribution requirement; this credit is provided as a courtesy.
 ```
 
+## AI Transcriber (vendored transcription engine)
+
+- Author: Musashino Software
+- Source: https://github.com/mssoftjp/obsidian-ai-transcriber
+- License: MIT
+
+The transcription engine under `src/transcribe/vendor/` is vendored from AI
+Transcriber (chunking, VAD, Whisper/GPT-4o clients, hallucination/repetition
+cleaners, transcript merge, dictionary correction). The files are kept pristine
+except for a small documented set of endpoint patches — see `VENDOR.md`.
+
+```
+MIT License
+
+Copyright (c) 2025 Musashino Software
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
 ## Day Planner (reference only)
 
 - Author: Ivan Lednev

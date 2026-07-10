@@ -24,22 +24,21 @@ A Granola-style meeting workflow for Obsidian on macOS. Meeting Copilot reads yo
 
 ## Required & optional plugins
 
-Meeting Copilot handles calendar, recording, and enrichment on its own. Some features hand off to other community plugins:
+Meeting Copilot handles calendar, recording, transcription, and enrichment on its own — no other plugin is required. Two optional plugins enhance specific features:
 
 | Plugin | Needed for | Required? |
 | --- | --- | --- |
-| [AI Transcriber](https://github.com/mssoftjp/obsidian-ai-transcriber) | Transcribing recordings (also drives auto-transcribe and enrich-on-transcribe) | **Required** for transcription |
 | [Dataview](https://github.com/blacksmithgu/obsidian-dataview) | The Meetings dashboard command | Optional |
 | [Tasks](https://github.com/obsidian-tasks-group/obsidian-tasks) | Tracking the `## Action items` checkboxes | Optional (checkboxes work without it) |
 
-> Transcription currently runs through AI Transcriber's engine. Install and enable it, and configure its API key / base URL (it also supports OpenAI-compatible / LiteLLM endpoints). AI enrichment uses Meeting Copilot's **own** endpoint settings and does not depend on any other plugin.
+> Transcription and enrichment share one OpenAI-compatible endpoint (OpenAI, Azure, a LiteLLM proxy, …), configured in Meeting Copilot's own settings. The transcription engine is bundled (vendored from [AI Transcriber](https://github.com/mssoftjp/obsidian-ai-transcriber), MIT); AI Transcriber does **not** need to be installed.
 
 ## Installation
 
 1. Build or download `main.js`, `manifest.json`, and `styles.css`.
 2. Copy them into `.obsidian/plugins/meeting-copilot/` in your vault.
 3. In Obsidian, enable **Meeting Copilot** under *Settings → Community plugins*.
-4. Install and enable the plugins you want from the table above (at least **AI Transcriber** if you want transcription).
+4. Optionally install the plugins from the table above (Dataview, Tasks).
 5. On your first recording, the macOS helper (`system-recorder`) is downloaded and verified (SHA-256), then macOS prompts for **Screen Recording** and **Microphone** permissions — grant both. (You can also ship a prebuilt helper next to `main.js`; see [Development](#development).)
 
 ## Setup
@@ -50,13 +49,17 @@ Meeting Copilot handles calendar, recording, and enrichment on its own. Some fea
 2. In *Settings → Meeting Copilot → Google Calendar integration*, paste the **Client ID** and **Client secret**, then click **Authenticate** and complete the browser sign-in.
 3. Optionally set the **Target calendar ID** (defaults to `primary`) and the agenda look-ahead / look-back windows.
 
+### AI endpoint (shared)
+
+In *Settings → Meeting Copilot → AI endpoint (shared)*, set the **API base URL** and **API key** for your OpenAI-compatible endpoint. These are used for **both** transcription and enrichment.
+
 ### Transcription
 
-Install **AI Transcriber**, enable it, and set its API key and base URL. Meeting Copilot calls it directly (no dialog) when you transcribe a recording or when *Auto-transcribe when recording stops* is on.
+In *Settings → Meeting Copilot → Transcription*, pick a **Transcription model** (`gpt-4o-transcribe` is most accurate; `whisper-1-ts` adds word timestamps), a language, and optionally enable **AI post-processing** and a **custom dictionary** (one `misheard => correct` rule per line). Transcription runs headlessly — no dialog — when you transcribe a recording or when *Auto-transcribe when recording stops* is on.
 
 ### AI enrichment
 
-In *Settings → Meeting Copilot → AI enrichment*, enable enrichment, set the **API base URL** and **API key**, then click **Test connection** to load the available models and pick one from the dropdown.
+In *Settings → Meeting Copilot → AI enrichment*, enable enrichment, then click **Test connection** (under the model row) to load the available chat models from the shared endpoint and pick one from the dropdown.
 
 ## Usage
 
@@ -71,8 +74,9 @@ In *Settings → Meeting Copilot → AI enrichment*, enable enrichment, set the 
 - **Recording folder** / **File name template**: for ad-hoc recordings.
 - **Meetings folder**: where calendar meeting notes (and their recordings) are created.
 - **Recording retention (days)**: recordings older than this are trashed on startup and via *Clean up old recordings*; `0` keeps them forever. Recordings linked to a note that hasn't been transcribed/enriched yet are protected.
-- **Auto-transcribe when recording stops**: transcribe automatically (no dialog) and add the transcript to the note.
-- **AI enrichment**: enable it, set an OpenAI-compatible base URL, API key, and model (via **Test connection** + dropdown); optionally enrich automatically after transcription.
+- **AI endpoint (shared)**: OpenAI-compatible base URL + API key used for both transcription and enrichment.
+- **Transcription**: model, language, voice-activity detection, AI post-processing, custom dictionary, and **Auto-transcribe when recording stops** (headless — no dialog).
+- **AI enrichment**: enable it, pick a chat model (via **Test connection** + dropdown); optionally enrich automatically after transcription.
 - **Action items as tasks**: lift enriched action items into `## Action items` checkboxes (preserving existing/completed tasks).
 
 Commands of note: *Clean up old recordings*, *Create/update meetings dashboard*, *Enrich meeting note (AI)*, *Toggle AI notes visibility*.

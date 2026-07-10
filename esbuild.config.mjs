@@ -20,6 +20,10 @@ const context = await esbuild.context({
 	external: [
 		"obsidian",
 		"electron",
+		// Local-VAD WASM loader. Meeting Copilot uses server-side VAD, so this
+		// dynamic import is never reached at runtime; kept external so the
+		// vendored engine bundles without shipping the WASM asset.
+		"@echogarden/fvad-wasm",
 		"@codemirror/autocomplete",
 		"@codemirror/collab",
 		"@codemirror/commands",

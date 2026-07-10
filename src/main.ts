@@ -37,6 +37,13 @@ import { findExpiredRecordings } from "./recordings/retention";
 const ACTION_ITEMS_HEADING = "## Action items";
 import { chatComplete } from "./enrich/llm";
 import { isPartialTranscript } from "./transcribe/partial";
+import {
+    initTranscribeEngine,
+    transcribeAudio,
+    type TranscribeConfig,
+} from "./transcribe/TranscriptionService";
+import { parseDictionary } from "./transcribe/dictionary";
+import type { TranscriptionModel } from "./transcribe/vendor/ApiSettings";
 import { ENRICH_SYSTEM_PROMPT, fillPrompt } from "./enrich/prompt";
 import { t } from "./i18n";
 import { TypedEventBus } from "./util/events";
@@ -99,6 +106,8 @@ export default class SystemRecordingPlugin extends Plugin {
 
     async onload() {
         await this.loadSettings();
+        // Prime the vendored transcription engine (i18n + plugin dir).
+        initTranscribeEngine(this.manifest.dir ?? null);
 
         // Ribbon icon
         this.ribbonIconEl = this.addRibbonIcon(
@@ -120,16 +129,6 @@ export default class SystemRecordingPlugin extends Plugin {
             name: t().commands.openAgenda,
             callback: () => void this.openAgenda(),
         });
-
-        // When a transcription finishes, drop it into the matching meeting note
-        // and refresh the agenda (ai-transcriber emits this custom event).
-        this.registerEvent(
-            this.app.workspace.on(
-                "transcription:completed" as never,
-                (payload: unknown) =>
-                    void this.handleTranscriptionCompleted(payload)
-            )
-        );
 
         // Expose the same actions as the agenda list (record, transcribe,
         // enrich, links, …) from the note's editor and file context menus.
@@ -252,11 +251,20 @@ export default class SystemRecordingPlugin extends Plugin {
     }
 
     async loadSettings() {
-        this.settings = Object.assign(
-            {},
-            DEFAULT_SETTINGS,
-            await this.loadData() as Partial<SystemRecordingSettings>
-        );
+        const raw = (await this.loadData()) as
+            | (Partial<SystemRecordingSettings> & {
+                  enrichBaseUrl?: string;
+                  enrichApiKey?: string;
+              })
+            | null;
+        this.settings = Object.assign({}, DEFAULT_SETTINGS, raw ?? {});
+        // Migrate the previously enrichment-only endpoint into the shared fields.
+        if (raw?.enrichBaseUrl && this.settings.apiBaseUrl === DEFAULT_SETTINGS.apiBaseUrl) {
+            this.settings.apiBaseUrl = raw.enrichBaseUrl;
+        }
+        if (raw?.enrichApiKey && !this.settings.apiKey) {
+            this.settings.apiKey = raw.enrichApiKey;
+        }
     }
 
     async saveSettings() {
@@ -723,16 +731,31 @@ export default class SystemRecordingPlugin extends Plugin {
         await this.launchTranscriber(m.recording);
     }
 
+    /** Maps plugin settings onto the vendored transcription engine's config. */
+    private buildTranscribeConfig(): TranscribeConfig {
+        const s = this.settings;
+        return {
+            baseUrl: s.apiBaseUrl,
+            apiKey: s.apiKey,
+            model: s.sttModel as TranscriptionModel,
+            modelOverride: s.sttModelId,
+            language: s.sttLanguage || "auto",
+            vadMode: s.vadMode,
+            postProcessingEnabled: s.postProcessingEnabled,
+            dictionaryCorrectionEnabled: s.dictionaryCorrectionEnabled,
+            userDictionaries: parseDictionary(s.dictionary),
+            debugMode: false,
+        };
+    }
+
     /**
-     * Transcribes an audio file by driving the AI Transcriber plugin's engine
-     * directly (Option C: headless bridge — no modal, no cost dialog, no
-     * separate transcript file). The returned text is routed through the same
-     * insert+enrich path as the plugin's own completion event.
+     * Transcribes an audio file with the vendored engine (headless — no modal,
+     * no separate transcript file). The transcript text is routed through the
+     * same insert+enrich path used elsewhere.
      */
     private async launchTranscriber(recording: TFile): Promise<void> {
-        const engine = this.aiTranscriberEngine();
-        if (!engine) {
-            new Notice(t().agenda.notices.transcriberMissing);
+        if (!this.settings.apiBaseUrl || !this.settings.apiKey) {
+            new Notice(t().notices.transcribeNoEndpoint);
             return;
         }
         // Guard against overlapping runs (double-click, or auto-transcribe
@@ -744,9 +767,11 @@ export default class SystemRecordingPlugin extends Plugin {
         this.transcribingPaths.add(recording.path);
         this.setActionStatus(t().statusBar.transcribing, "busy");
         try {
-            const result = await engine.transcribe(recording);
-            const text =
-                typeof result === "string" ? result : (result?.text ?? "");
+            const text = await transcribeAudio(
+                this.app,
+                recording,
+                this.buildTranscribeConfig()
+            );
             const trimmed = text.trim();
             if (!trimmed) {
                 new Notice(t().notices.transcribeEmpty);
@@ -775,44 +800,6 @@ export default class SystemRecordingPlugin extends Plugin {
         } finally {
             this.transcribingPaths.delete(recording.path);
         }
-    }
-
-    /**
-     * The AI Transcriber plugin's transcription engine, if the plugin is
-     * installed and enabled. This reaches into a non-public API shape; when we
-     * vendor the engine (Option A) this bridge goes away.
-     */
-    private aiTranscriberEngine(): {
-        transcribe(
-            file: TFile
-        ): Promise<string | { text: string; modelUsed?: string }>;
-    } | null {
-        const plugins = (
-            this.app as unknown as {
-                plugins?: { plugins?: Record<string, unknown> };
-            }
-        ).plugins?.plugins;
-        const tp = plugins?.["ai-transcriber"] as
-            | {
-                  transcriber?: {
-                      transcribe?: (
-                          file: TFile
-                      ) => Promise<
-                          string | { text: string; modelUsed?: string }
-                      >;
-                  };
-              }
-            | undefined;
-        const engine = tp?.transcriber;
-        // Guard against the plugin being present but not yet initialized, or a
-        // future refactor that changes this internal shape.
-        return engine && typeof engine.transcribe === "function"
-            ? (engine as {
-                  transcribe(
-                      file: TFile
-                  ): Promise<string | { text: string; modelUsed?: string }>;
-              })
-            : null;
     }
 
     private openMeetingLink(url: string): void {
@@ -1069,8 +1056,8 @@ export default class SystemRecordingPlugin extends Plugin {
             new Notice(t().notices.enrichDisabled);
             return;
         }
-        const { enrichBaseUrl, enrichApiKey, enrichModel } = this.settings;
-        if (!enrichBaseUrl || !enrichApiKey || !enrichModel) {
+        const { apiBaseUrl, apiKey, enrichModel } = this.settings;
+        if (!apiBaseUrl || !apiKey || !enrichModel) {
             new Notice(t().notices.enrichNotConfigured);
             return;
         }
@@ -1111,8 +1098,8 @@ export default class SystemRecordingPlugin extends Plugin {
             new Notice(t().notices.enriching);
             this.setActionStatus(t().statusBar.enriching, "busy");
             const output = await chatComplete({
-                baseUrl: enrichBaseUrl,
-                apiKey: enrichApiKey,
+                baseUrl: apiBaseUrl,
+                apiKey: apiKey,
                 model: enrichModel,
                 system: ENRICH_SYSTEM_PROMPT,
                 user: fillPrompt(this.settings.enrichPrompt, ctx),

@@ -28,14 +28,34 @@ export interface SystemRecordingSettings {
 	openMeetAutomatically: boolean;
 	agendaLookAheadDays: number;
 	agendaLookBackDays: number;
+	// Shared OpenAI-compatible endpoint + credentials (transcription + enrichment).
+	apiBaseUrl: string;
+	apiKey: string;
+	// Transcription (vendored engine).
+	sttModel: string;
+	/** Custom deployment name to send instead of the canonical model id (e.g. LiteLLM `llm-gateway/whisper`). */
+	sttModelId: string;
+	sttLanguage: string;
+	vadMode: "server" | "disabled";
+	postProcessingEnabled: boolean;
+	dictionaryCorrectionEnabled: boolean;
+	/** Custom dictionary, one `misheard => correct` rule per line (English). */
+	dictionary: string;
+	// Enrichment.
 	enableEnrichment: boolean;
-	enrichBaseUrl: string;
-	enrichApiKey: string;
 	enrichModel: string;
 	enrichPrompt: string;
 	enrichOnTranscribe: boolean;
 	hideAiNotes: boolean;
 }
+
+/** Transcription models the vendored engine understands (routes Whisper vs GPT-4o). */
+export const STT_MODELS = [
+	"gpt-4o-transcribe",
+	"gpt-4o-mini-transcribe",
+	"whisper-1",
+	"whisper-1-ts",
+] as const;
 
 export const DEFAULT_SETTINGS: SystemRecordingSettings = {
 	recordingFolder: "recordings",
@@ -56,9 +76,16 @@ export const DEFAULT_SETTINGS: SystemRecordingSettings = {
 	openMeetAutomatically: true,
 	agendaLookAheadDays: 7,
 	agendaLookBackDays: 7,
+	apiBaseUrl: "https://api.openai.com/v1",
+	apiKey: "",
+	sttModel: "gpt-4o-transcribe",
+	sttModelId: "",
+	sttLanguage: "auto",
+	vadMode: "server",
+	postProcessingEnabled: false,
+	dictionaryCorrectionEnabled: false,
+	dictionary: "",
 	enableEnrichment: true,
-	enrichBaseUrl: "https://api.openai.com/v1",
-	enrichApiKey: "",
 	enrichModel: "gpt-4o",
 	enrichPrompt: DEFAULT_ENRICH_PROMPT,
 	enrichOnTranscribe: true,
@@ -79,111 +106,6 @@ export class SystemRecordingSettingTab extends PluginSettingTab {
         const { containerEl } = this;
         const s = t();
         containerEl.empty();
-
-        new Setting(containerEl)
-            .setName(s.settings.recordingFolder.name)
-            .setDesc(s.settings.recordingFolder.desc)
-            .addText((text) =>
-                text
-                    .setPlaceholder(s.settings.recordingFolder.placeholder)
-                    .setValue(this.plugin.settings.recordingFolder)
-                    .onChange(async (value) => {
-                        this.plugin.settings.recordingFolder = value;
-                        await this.plugin.saveSettings();
-                    })
-            );
-
-        new Setting(containerEl)
-            .setName(s.settings.fileNameTemplate.name)
-            .setDesc(s.settings.fileNameTemplate.desc)
-            .addText((text) =>
-                text
-                    .setValue(this.plugin.settings.fileNameTemplate)
-                    .onChange(async (value) => {
-                        this.plugin.settings.fileNameTemplate = value;
-                        await this.plugin.saveSettings();
-                    })
-            );
-
-        new Setting(containerEl)
-            .setName(s.settings.meetingsFolder.name)
-            .setDesc(s.settings.meetingsFolder.desc)
-            .addText((text) =>
-                text
-                    .setPlaceholder(s.settings.meetingsFolder.placeholder)
-                    .setValue(this.plugin.settings.meetingsFolder)
-                    .onChange(async (value) => {
-                        this.plugin.settings.meetingsFolder = value.trim() || "Meetings";
-                        await this.plugin.saveSettings();
-                    })
-            );
-
-        new Setting(containerEl)
-            .setName(s.settings.noteTitlePattern.name)
-            .setDesc(s.settings.noteTitlePattern.desc)
-            .addText((text) =>
-                text
-                    .setPlaceholder(DEFAULT_TITLE_PATTERN)
-                    .setValue(this.plugin.settings.noteTitlePattern)
-                    .onChange(async (value) => {
-                        this.plugin.settings.noteTitlePattern =
-                            value.trim() || DEFAULT_TITLE_PATTERN;
-                        await this.plugin.saveSettings();
-                    })
-            );
-
-        new Setting(containerEl)
-            .setName(s.settings.noteTemplate.name)
-            .setDesc(s.settings.noteTemplate.desc)
-            .addTextArea((ta) => {
-                ta.setValue(this.plugin.settings.noteTemplate).onChange(
-                    async (value) => {
-                        this.plugin.settings.noteTemplate =
-                            value || DEFAULT_NOTE_TEMPLATE;
-                        await this.plugin.saveSettings();
-                    }
-                );
-                ta.inputEl.rows = 12;
-                ta.inputEl.addClass("meeting-copilot-template-input");
-            });
-
-        new Setting(containerEl)
-            .setName(s.settings.insertTranscript.name)
-            .setDesc(s.settings.insertTranscript.desc)
-            .addToggle((toggle) =>
-                toggle
-                    .setValue(this.plugin.settings.insertTranscript)
-                    .onChange(async (value) => {
-                        this.plugin.settings.insertTranscript = value;
-                        await this.plugin.saveSettings();
-                    })
-            );
-
-        new Setting(containerEl)
-            .setName(s.settings.autoTranscribe.name)
-            .setDesc(s.settings.autoTranscribe.desc)
-            .addToggle((toggle) =>
-                toggle
-                    .setValue(this.plugin.settings.autoTranscribe)
-                    .onChange(async (value) => {
-                        this.plugin.settings.autoTranscribe = value;
-                        await this.plugin.saveSettings();
-                    })
-            );
-
-        new Setting(containerEl)
-            .setName(s.settings.retentionDays.name)
-            .setDesc(s.settings.retentionDays.desc)
-            .addText((text) => {
-                text.inputEl.type = "number";
-                text
-                    .setValue(String(this.plugin.settings.retentionDays))
-                    .onChange(async (value) => {
-                        const n = Number.parseInt(value, 10);
-                        this.plugin.settings.retentionDays = Number.isFinite(n) && n >= 0 ? n : 0;
-                        await this.plugin.saveSettings();
-                    });
-            });
 
 		new Setting(containerEl).setName(s.settings.calendarHeading).setHeading();
 
@@ -324,6 +246,159 @@ export class SystemRecordingSettingTab extends PluginSettingTab {
 					});
 			});
 
+		// ---- AI endpoint (shared by transcription + enrichment) ----
+		new Setting(containerEl).setName(s.settings.endpointHeading).setHeading();
+
+		new Setting(containerEl)
+			.setName(s.settings.apiBaseUrl.name)
+			.setDesc(s.settings.apiBaseUrl.desc)
+			.addText((text) =>
+				text
+					.setPlaceholder("https://api.openai.com/v1")
+					.setValue(this.plugin.settings.apiBaseUrl)
+					.onChange(async (value) => {
+						this.plugin.settings.apiBaseUrl = value.trim();
+						await this.plugin.saveSettings();
+					})
+			);
+
+		new Setting(containerEl)
+			.setName(s.settings.apiKey.name)
+			.setDesc(s.settings.apiKey.desc)
+			.addText((text) => {
+				text.inputEl.type = "password";
+				text
+					.setValue(this.plugin.settings.apiKey)
+					.onChange(async (value) => {
+						this.plugin.settings.apiKey = value.trim();
+						await this.plugin.saveSettings();
+					});
+			});
+
+		// ---- Transcription ----
+		new Setting(containerEl)
+			.setName(s.settings.transcriptionHeading)
+			.setHeading();
+
+		new Setting(containerEl)
+			.setName(s.settings.sttModel.name)
+			.setDesc(s.settings.sttModel.desc)
+			.addDropdown((dd) => {
+				for (const m of STT_MODELS) dd.addOption(m, m);
+				dd.setValue(this.plugin.settings.sttModel).onChange(
+					async (value) => {
+						this.plugin.settings.sttModel = value;
+						await this.plugin.saveSettings();
+					}
+				);
+			});
+
+		new Setting(containerEl)
+			.setName(s.settings.sttModelId.name)
+			.setDesc(s.settings.sttModelId.desc)
+			.addText((text) =>
+				text
+					.setPlaceholder(s.settings.sttModelId.placeholder)
+					.setValue(this.plugin.settings.sttModelId)
+					.onChange(async (value) => {
+						this.plugin.settings.sttModelId = value.trim();
+						await this.plugin.saveSettings();
+					})
+			);
+
+		new Setting(containerEl)
+			.setName(s.settings.sttLanguage.name)
+			.setDesc(s.settings.sttLanguage.desc)
+			.addText((text) =>
+				text
+					.setPlaceholder("Auto-detect")
+					.setValue(this.plugin.settings.sttLanguage)
+					.onChange(async (value) => {
+						this.plugin.settings.sttLanguage =
+							value.trim() || "auto";
+						await this.plugin.saveSettings();
+					})
+			);
+
+		new Setting(containerEl)
+			.setName(s.settings.vadMode.name)
+			.setDesc(s.settings.vadMode.desc)
+			.addDropdown((dd) =>
+				dd
+					.addOption("server", s.settings.vadMode.server)
+					.addOption("disabled", s.settings.vadMode.disabled)
+					.setValue(this.plugin.settings.vadMode)
+					.onChange(async (value) => {
+						this.plugin.settings.vadMode =
+							value === "disabled" ? "disabled" : "server";
+						await this.plugin.saveSettings();
+					})
+			);
+
+		new Setting(containerEl)
+			.setName(s.settings.postProcessing.name)
+			.setDesc(s.settings.postProcessing.desc)
+			.addToggle((toggle) =>
+				toggle
+					.setValue(this.plugin.settings.postProcessingEnabled)
+					.onChange(async (value) => {
+						this.plugin.settings.postProcessingEnabled = value;
+						await this.plugin.saveSettings();
+					})
+			);
+
+		new Setting(containerEl)
+			.setName(s.settings.dictionaryCorrection.name)
+			.setDesc(s.settings.dictionaryCorrection.desc)
+			.addToggle((toggle) =>
+				toggle
+					.setValue(this.plugin.settings.dictionaryCorrectionEnabled)
+					.onChange(async (value) => {
+						this.plugin.settings.dictionaryCorrectionEnabled = value;
+						await this.plugin.saveSettings();
+					})
+			);
+
+		new Setting(containerEl)
+			.setName(s.settings.dictionary.name)
+			.setDesc(s.settings.dictionary.desc)
+			.addTextArea((ta) => {
+				ta
+					.setPlaceholder(s.settings.dictionary.placeholder)
+					.setValue(this.plugin.settings.dictionary)
+					.onChange(async (value) => {
+						this.plugin.settings.dictionary = value;
+						await this.plugin.saveSettings();
+					});
+				ta.inputEl.rows = 4;
+				ta.inputEl.addClass("meeting-copilot-template-input");
+			});
+
+		new Setting(containerEl)
+			.setName(s.settings.autoTranscribe.name)
+			.setDesc(s.settings.autoTranscribe.desc)
+			.addToggle((toggle) =>
+				toggle
+					.setValue(this.plugin.settings.autoTranscribe)
+					.onChange(async (value) => {
+						this.plugin.settings.autoTranscribe = value;
+						await this.plugin.saveSettings();
+					})
+			);
+
+		new Setting(containerEl)
+			.setName(s.settings.insertTranscript.name)
+			.setDesc(s.settings.insertTranscript.desc)
+			.addToggle((toggle) =>
+				toggle
+					.setValue(this.plugin.settings.insertTranscript)
+					.onChange(async (value) => {
+						this.plugin.settings.insertTranscript = value;
+						await this.plugin.saveSettings();
+					})
+			);
+
+		// ---- AI enrichment ----
 		new Setting(containerEl).setName(s.settings.enrichHeading).setHeading();
 
 		new Setting(containerEl)
@@ -337,32 +412,6 @@ export class SystemRecordingSettingTab extends PluginSettingTab {
 						await this.plugin.saveSettings();
 					})
 			);
-
-		new Setting(containerEl)
-			.setName(s.settings.enrichBaseUrl.name)
-			.setDesc(s.settings.enrichBaseUrl.desc)
-			.addText((text) =>
-				text
-					.setPlaceholder("https://api.openai.com/v1")
-					.setValue(this.plugin.settings.enrichBaseUrl)
-					.onChange(async (value) => {
-						this.plugin.settings.enrichBaseUrl = value.trim();
-						await this.plugin.saveSettings();
-					})
-			);
-
-		new Setting(containerEl)
-			.setName(s.settings.enrichApiKey.name)
-			.setDesc(s.settings.enrichApiKey.desc)
-			.addText((text) => {
-				text.inputEl.type = "password";
-				text
-					.setValue(this.plugin.settings.enrichApiKey)
-					.onChange(async (value) => {
-						this.plugin.settings.enrichApiKey = value.trim();
-						await this.plugin.saveSettings();
-					});
-			});
 
 		this.renderEnrichModelSetting(containerEl);
 
@@ -403,6 +452,94 @@ export class SystemRecordingSettingTab extends PluginSettingTab {
 						await this.plugin.saveSettings();
 					})
 			);
+
+		// ---- Recording & notes ----
+		new Setting(containerEl)
+			.setName(s.settings.recordingHeading)
+			.setHeading();
+
+		new Setting(containerEl)
+			.setName(s.settings.recordingFolder.name)
+			.setDesc(s.settings.recordingFolder.desc)
+			.addText((text) =>
+				text
+					.setPlaceholder(s.settings.recordingFolder.placeholder)
+					.setValue(this.plugin.settings.recordingFolder)
+					.onChange(async (value) => {
+						this.plugin.settings.recordingFolder = value;
+						await this.plugin.saveSettings();
+					})
+			);
+
+		new Setting(containerEl)
+			.setName(s.settings.fileNameTemplate.name)
+			.setDesc(s.settings.fileNameTemplate.desc)
+			.addText((text) =>
+				text
+					.setValue(this.plugin.settings.fileNameTemplate)
+					.onChange(async (value) => {
+						this.plugin.settings.fileNameTemplate = value;
+						await this.plugin.saveSettings();
+					})
+			);
+
+		new Setting(containerEl)
+			.setName(s.settings.meetingsFolder.name)
+			.setDesc(s.settings.meetingsFolder.desc)
+			.addText((text) =>
+				text
+					.setPlaceholder(s.settings.meetingsFolder.placeholder)
+					.setValue(this.plugin.settings.meetingsFolder)
+					.onChange(async (value) => {
+						this.plugin.settings.meetingsFolder =
+							value.trim() || "Meetings";
+						await this.plugin.saveSettings();
+					})
+			);
+
+		new Setting(containerEl)
+			.setName(s.settings.noteTitlePattern.name)
+			.setDesc(s.settings.noteTitlePattern.desc)
+			.addText((text) =>
+				text
+					.setPlaceholder(DEFAULT_TITLE_PATTERN)
+					.setValue(this.plugin.settings.noteTitlePattern)
+					.onChange(async (value) => {
+						this.plugin.settings.noteTitlePattern =
+							value.trim() || DEFAULT_TITLE_PATTERN;
+						await this.plugin.saveSettings();
+					})
+			);
+
+		new Setting(containerEl)
+			.setName(s.settings.noteTemplate.name)
+			.setDesc(s.settings.noteTemplate.desc)
+			.addTextArea((ta) => {
+				ta.setValue(this.plugin.settings.noteTemplate).onChange(
+					async (value) => {
+						this.plugin.settings.noteTemplate =
+							value || DEFAULT_NOTE_TEMPLATE;
+						await this.plugin.saveSettings();
+					}
+				);
+				ta.inputEl.rows = 12;
+				ta.inputEl.addClass("meeting-copilot-template-input");
+			});
+
+		new Setting(containerEl)
+			.setName(s.settings.retentionDays.name)
+			.setDesc(s.settings.retentionDays.desc)
+			.addText((text) => {
+				text.inputEl.type = "number";
+				text
+					.setValue(String(this.plugin.settings.retentionDays))
+					.onChange(async (value) => {
+						const n = Number.parseInt(value, 10);
+						this.plugin.settings.retentionDays =
+							Number.isFinite(n) && n >= 0 ? n : 0;
+						await this.plugin.saveSettings();
+					});
+			});
     }
 
     /**
@@ -445,9 +582,8 @@ export class SystemRecordingSettingTab extends PluginSettingTab {
             button
                 .setButtonText(s.settings.testConnection.button)
                 .onClick(async () => {
-                    const { enrichBaseUrl, enrichApiKey } =
-                        this.plugin.settings;
-                    if (!enrichBaseUrl) {
+                    const { apiBaseUrl, apiKey } = this.plugin.settings;
+                    if (!apiBaseUrl) {
                         new Notice(s.settings.testConnection.noBaseUrl);
                         return;
                     }
@@ -455,8 +591,8 @@ export class SystemRecordingSettingTab extends PluginSettingTab {
                     button.setDisabled(true);
                     try {
                         this.enrichModels = await listModels(
-                            enrichBaseUrl,
-                            enrichApiKey
+                            apiBaseUrl,
+                            apiKey
                         );
                         new Notice(
                             this.enrichModels.length === 0

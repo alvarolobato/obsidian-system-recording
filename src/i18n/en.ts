@@ -53,6 +53,8 @@ export const en = {
 		transcribeInProgress: "This recording is already being transcribed…",
 		transcribeNoNote: (audio: string) =>
 			`Transcribed "${audio}" but found no meeting note to add it to.`,
+		transcribeNoEndpoint:
+			"Set the AI endpoint (base URL + API key) in settings before transcribing.",
 	},
 	statusBar: {
 		recording: (hms: string) => `Recording ${hms}`,
@@ -114,8 +116,6 @@ export const en = {
 		notices: {
 			linkCopied: "Meeting link copied",
 			noRecording: "No recording for this meeting yet",
-			transcriberMissing:
-				"AI Transcriber not found. Open the recording and run it manually.",
 		},
 	},
 	settings: {
@@ -198,18 +198,53 @@ export const en = {
 			name: "Agenda look-back (days)",
 			desc: "How many past days you can navigate back to in the agenda (0–30).",
 		},
+		endpointHeading: "AI endpoint (shared)",
+		apiBaseUrl: {
+			name: "API base URL",
+			desc: "OpenAI-compatible endpoint (OpenAI, Azure, a LiteLLM proxy, …) used for BOTH transcription and enrichment. The /audio/transcriptions and /chat/completions paths are appended.",
+		},
+		apiKey: {
+			name: "API key",
+			desc: "Sent as a Bearer token for transcription and enrichment. Stored in this vault's plugin data.",
+		},
+		transcriptionHeading: "Transcription",
+		sttModel: {
+			name: "Transcription model",
+			desc: "Speech-to-text family. gpt-4o-transcribe is most accurate; whisper-1-ts adds word timestamps. This also selects the API shape (Whisper vs GPT-4o).",
+		},
+		sttModelId: {
+			name: "Custom model ID",
+			desc: "Optional. The exact deployment name to send if your gateway renames models (e.g. a LiteLLM proxy). Leave blank to use the model above.",
+			placeholder: "llm-gateway/whisper",
+		},
+		sttLanguage: {
+			name: "Language",
+			desc: "ISO code (e.g. en, ja) or 'auto' to detect.",
+		},
+		vadMode: {
+			name: "Voice activity detection",
+			desc: "Server-side VAD lets the API split on speech; disabled uses fixed-size chunks.",
+			server: "Server-side (recommended)",
+			disabled: "Disabled",
+		},
+		postProcessing: {
+			name: "AI post-processing",
+			desc: "Clean up filler words and repetitions with the model after transcription.",
+		},
+		dictionaryCorrection: {
+			name: "Custom dictionary correction",
+			desc: "Apply the rules below to fix misheard names and terms.",
+		},
+		dictionary: {
+			name: "Dictionary",
+			desc: "One rule per line: misheard => correct. Example: elastic search => Elasticsearch",
+			placeholder: "elastic search => Elasticsearch\nkubernetis => Kubernetes",
+		},
+		recordingHeading: "Recording & notes",
 		enrichHeading: "AI enrichment",
 		enableEnrichment: {
 			name: "Enable AI enrichment",
 			desc: "Allow generating an AI notes summary from your notes and the transcript.",
-		},
-		enrichBaseUrl: {
-			name: "API base URL",
-			desc: "OpenAI-compatible endpoint (OpenAI, Azure, a LiteLLM proxy, Ollama, …). The /chat/completions path is appended.",
-		},
-		enrichApiKey: {
-			name: "API key",
-			desc: "Sent as a Bearer token. Stored in this vault's plugin data.",
 		},
 		enrichModel: {
 			name: "Model",
@@ -218,7 +253,7 @@ export const en = {
 		testConnection: {
 			button: "Test connection",
 			testing: "Testing…",
-			noBaseUrl: "Set the enrichment base URL first.",
+			noBaseUrl: "Set the API base URL first.",
 			success: (n: number) =>
 				`Connected. Loaded ${n} model${n === 1 ? "" : "s"}.`,
 			empty: "Connected, but the endpoint returned no models.",
