@@ -32,6 +32,7 @@ export const ja: Messages = {
 		started: (title: string) => `「${title}」が始まりました`,
 		ended: (title: string) => `「${title}」が終了しました`,
 		startRecordingAction: "録音開始",
+		createNoteAndRecord: "ノートを作成して録音開始",
 		stopRecordingAction: "録音停止",
 	},
 	settings: {
@@ -43,6 +44,15 @@ export const ja: Messages = {
 		fileNameTemplate: {
 			name: "File name template",
 			desc: "File name format. Tokens `YYYY MM DD HH mm ss` are replaced with the date and time.",
+		},
+		meetingsFolder: {
+			name: "会議フォルダ",
+			desc: "会議ノートと録音の保存先フォルダ。繰り返しの予定は専用のサブフォルダに保存します。",
+			placeholder: "Meetings",
+		},
+		retentionDays: {
+			name: "録音の保持日数",
+			desc: "文字起こし後、録音は m4a に圧縮され、この日数を過ぎると削除されます。0 で無期限に保持します。",
 		},
 		calendarHeading: "Google カレンダー連携",
 		clientId: {

@@ -4,7 +4,20 @@ import { CalendarScheduler, GRACE_MS, ScheduledEvent, SchedulerDeps } from "./sc
 const T = 1_000_000_000_000; // fixed base epoch ms
 
 function evt(over: Partial<ScheduledEvent> = {}): ScheduledEvent {
-	return { id: "e1", summary: "Meeting", start: T, end: T + 3_600_000, meetLink: null, ...over };
+	return {
+		id: "e1",
+		summary: "Meeting",
+		start: T,
+		end: T + 3_600_000,
+		meetLink: null,
+		location: "",
+		htmlLink: "",
+		attendees: [],
+		organizer: null,
+		iCalUID: null,
+		recurringEventId: null,
+		...over,
+	};
 }
 
 function makeDeps(nowRef: { v: number }, events: ScheduledEvent[], over: Partial<SchedulerDeps> = {}): SchedulerDeps {

@@ -1,4 +1,4 @@
-import { FileSystemAdapter, MarkdownView, Notice, Platform, Plugin } from "obsidian";
+import { FileSystemAdapter, MarkdownView, Notice, Platform, Plugin, TFile } from "obsidian";
 import {
     DEFAULT_SETTINGS,
     SystemRecordingSettings,
@@ -13,6 +13,11 @@ import { listEvents } from "./calendar/googleCalendar";
 import { shouldRecord, parseKeywords } from "./calendar/eventFilter";
 import { CalendarScheduler, ScheduledEvent } from "./calendar/scheduler";
 import { actionNotice } from "./ui/actionNotice";
+import {
+    createMeetingNote,
+    linkRecording,
+    MeetingEventInfo,
+} from "./notes/meetingNote";
 import { t } from "./i18n";
 
 export default class SystemRecordingPlugin extends Plugin {
@@ -37,6 +42,8 @@ export default class SystemRecordingPlugin extends Plugin {
 		},
 	});
 	private scheduler: CalendarScheduler | null = null;
+	/** Note the in-progress recording belongs to, so we can link it back on stop. */
+	private currentMeetingNotePath: string | null = null;
 
     async onload() {
         await this.loadSettings();
@@ -128,7 +135,11 @@ export default class SystemRecordingPlugin extends Plugin {
         }
     }
 
-    private async startRecording() {
+    private async startRecording(meeting?: {
+        folder: string;
+        basename: string;
+        notePath: string;
+    }) {
         if (this.recorder.isRecording) {
             new Notice(t().notices.alreadyRecording);
             return;
@@ -159,16 +170,31 @@ export default class SystemRecordingPlugin extends Plugin {
                 return;
             }
 
-            // Ensure recording folder exists
-            const folder = this.settings.recordingFolder;
             const adapter = this.app.vault.adapter;
-            if (!(await adapter.exists(folder))) {
-                await adapter.mkdir(folder);
+
+            // Meeting recordings live beside their note (same folder + basename);
+            // ad-hoc recordings fall back to the template in the recordings folder.
+            let relativePath: string;
+            if (meeting) {
+                if (!(await adapter.exists(meeting.folder))) {
+                    await adapter.mkdir(meeting.folder);
+                }
+                relativePath = await this.uniqueWavPath(
+                    adapter,
+                    meeting.folder,
+                    meeting.basename
+                );
+                this.currentMeetingNotePath = meeting.notePath;
+            } else {
+                const folder = this.settings.recordingFolder;
+                if (!(await adapter.exists(folder))) {
+                    await adapter.mkdir(folder);
+                }
+                const fileName = this.formatFileName(this.settings.fileNameTemplate);
+                relativePath = `${folder}/${fileName}.wav`;
+                this.currentMeetingNotePath = null;
             }
 
-            // Generate file name
-            const fileName = this.formatFileName(this.settings.fileNameTemplate);
-            const relativePath = `${folder}/${fileName}.wav`;
             const vaultBasePath =
                 adapter instanceof FileSystemAdapter ? adapter.getBasePath() : "";
             const absolutePath = path.join(vaultBasePath, relativePath);
@@ -255,6 +281,12 @@ export default class SystemRecordingPlugin extends Plugin {
 				start: e.start.getTime(),
 				end: e.end.getTime(),
 				meetLink: e.meetLink,
+				location: e.location,
+				htmlLink: e.htmlLink,
+				attendees: e.attendees,
+				organizer: e.organizer,
+				iCalUID: e.iCalUID,
+				recurringEventId: e.recurringEventId,
 			}));
 	}
 
@@ -270,11 +302,50 @@ export default class SystemRecordingPlugin extends Plugin {
 		}
 		actionNotice(
 			t().event.started(event.summary),
-			t().event.startRecordingAction,
+			t().event.createNoteAndRecord,
 			() => {
-				void this.startRecording();
+				void this.startMeetingRecording(event);
 			}
 		);
+	}
+
+	/** Creates & opens the meeting note from calendar data, then records beside it. */
+	private async startMeetingRecording(event: ScheduledEvent): Promise<void> {
+		if (!Platform.isMacOS) {
+			new Notice(t().notices.macOnly);
+			return;
+		}
+		try {
+			const ref = await createMeetingNote(
+				this.app,
+				this.settings.meetingsFolder,
+				this.toMeetingInfo(event)
+			);
+			await this.app.workspace.getLeaf(false).openFile(ref.file);
+			await this.startRecording({
+				folder: ref.folder,
+				basename: ref.basename,
+				notePath: ref.notePath,
+			});
+		} catch (e) {
+			new Notice(t().notices.recordingError(e instanceof Error ? e.message : String(e)));
+		}
+	}
+
+	private toMeetingInfo(e: ScheduledEvent): MeetingEventInfo {
+		return {
+			id: e.id,
+			summary: e.summary,
+			start: new Date(e.start),
+			end: new Date(e.end),
+			meetLink: e.meetLink,
+			location: e.location,
+			htmlLink: e.htmlLink,
+			attendees: e.attendees,
+			organizer: e.organizer,
+			iCalUID: e.iCalUID,
+			recurringEventId: e.recurringEventId,
+		};
 	}
 
 	private handleEventEnd(event: ScheduledEvent): void {
@@ -295,9 +366,10 @@ export default class SystemRecordingPlugin extends Plugin {
             this.updateRibbonIcon(false);
             this.hideStatusBar();
 
-            // Insert link into current note
             const fileName = path.basename(status.file);
-            this.insertRecordingLink(fileName);
+            // Meeting recordings are linked into their own note; ad-hoc ones go
+            // to the active note as before.
+            void this.attachRecording(fileName);
             new Notice(t().notices.recordingSaved);
         } else if (status.status === "error") {
             this.clearDurationTimer();
@@ -352,6 +424,34 @@ export default class SystemRecordingPlugin extends Plugin {
                 this.ribbonIconEl.removeClass("is-recording");
             }
         }
+    }
+
+    private async attachRecording(fileName: string) {
+        const notePath = this.currentMeetingNotePath;
+        this.currentMeetingNotePath = null;
+        if (notePath) {
+            const file = this.app.vault.getAbstractFileByPath(notePath);
+            if (file instanceof TFile) {
+                await linkRecording(this.app, file, fileName);
+                return;
+            }
+        }
+        this.insertRecordingLink(fileName);
+    }
+
+    /** Returns a vault-relative `.wav` path, appending -2, -3… if the name is taken. */
+    private async uniqueWavPath(
+        adapter: import("obsidian").DataAdapter,
+        folder: string,
+        basename: string
+    ): Promise<string> {
+        let candidate = `${folder}/${basename}.wav`;
+        let n = 2;
+        while (await adapter.exists(candidate)) {
+            candidate = `${folder}/${basename}-${n}.wav`;
+            n++;
+        }
+        return candidate;
     }
 
     private insertRecordingLink(fileName: string) {

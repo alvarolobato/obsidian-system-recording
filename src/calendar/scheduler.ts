@@ -4,6 +4,12 @@ export interface ScheduledEvent {
 	start: number; // epoch ms
 	end: number; // epoch ms
 	meetLink: string | null;
+	location: string;
+	htmlLink: string;
+	attendees: string[];
+	organizer: string | null;
+	iCalUID: string | null;
+	recurringEventId: string | null;
 }
 
 export interface SchedulerDeps {

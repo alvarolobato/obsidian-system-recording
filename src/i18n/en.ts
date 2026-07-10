@@ -30,6 +30,7 @@ export const en = {
 		started: (title: string) => `"${title}" has started`,
 		ended: (title: string) => `"${title}" has ended`,
 		startRecordingAction: "Start recording",
+		createNoteAndRecord: "Create note and start recording",
 		stopRecordingAction: "Stop recording",
 	},
 	settings: {
@@ -41,6 +42,15 @@ export const en = {
 		fileNameTemplate: {
 			name: "File name template",
 			desc: "File name format. Tokens `YYYY MM DD HH mm ss` are replaced with the date and time.",
+		},
+		meetingsFolder: {
+			name: "Meetings folder",
+			desc: "Folder for meeting notes and their recordings. Recurring meetings get their own subfolder.",
+			placeholder: "Meetings",
+		},
+		retentionDays: {
+			name: "Recording retention (days)",
+			desc: "After transcription, recordings are compressed to m4a and deleted once older than this. 0 keeps them forever.",
 		},
 		calendarHeading: "Google Calendar integration",
 		clientId: {

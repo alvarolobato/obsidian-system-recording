@@ -11,6 +11,13 @@ export interface GCalEvent {
 	allDay: boolean;
 	meetLink: string | null;
 	htmlLink: string;
+	/** Display names (falling back to email) of human attendees, excluding rooms/resources. */
+	attendees: string[];
+	organizer: string | null;
+	/** Stable identifier shared across every instance of a recurring series. */
+	iCalUID: string | null;
+	/** Present only on instances of a recurring series; points at the master event. */
+	recurringEventId: string | null;
 }
 
 export interface GCalCalendar {
@@ -21,13 +28,32 @@ export interface GCalCalendar {
 
 const API = "https://www.googleapis.com/calendar/v3";
 
+interface RawAttendee {
+	email?: string;
+	displayName?: string;
+	resource?: boolean;
+	self?: boolean;
+}
+
 interface RawEvent extends RawConferenceEvent {
 	id?: string;
 	summary?: string;
 	location?: string;
 	htmlLink?: string;
+	iCalUID?: string;
+	recurringEventId?: string;
+	organizer?: { email?: string; displayName?: string };
+	attendees?: RawAttendee[];
 	start?: { date?: string; dateTime?: string };
 	end?: { date?: string; dateTime?: string };
+}
+
+/** Maps raw attendees to display names, dropping meeting rooms and other resources. */
+function mapAttendees(raw: RawAttendee[] | undefined): string[] {
+	return (raw ?? [])
+		.filter((a) => !a.resource)
+		.map((a) => (a.displayName || a.email || "").trim())
+		.filter((name) => name.length > 0);
 }
 
 async function authedGet(oauth: GoogleOAuth, url: string): Promise<unknown> {
@@ -79,6 +105,8 @@ export async function listEvents(
 		const end = isAllDay
 			? new Date((ev.end?.date ?? "") + "T00:00:00")
 			: new Date(ev.end?.dateTime ?? "");
+		const organizer =
+			(ev.organizer?.displayName || ev.organizer?.email || "").trim() || null;
 		return {
 			id: ev.id ?? "",
 			summary: ev.summary ?? "(no title)",
@@ -88,6 +116,10 @@ export async function listEvents(
 			allDay: isAllDay,
 			meetLink: extractMeetLink(ev),
 			htmlLink: ev.htmlLink ?? "",
+			attendees: mapAttendees(ev.attendees),
+			organizer,
+			iCalUID: ev.iCalUID ?? null,
+			recurringEventId: ev.recurringEventId ?? null,
 		};
 	});
 }

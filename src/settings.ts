@@ -6,6 +6,8 @@ import { t } from "./i18n";
 export interface SystemRecordingSettings {
 	recordingFolder: string;
 	fileNameTemplate: string;
+	meetingsFolder: string;
+	retentionDays: number;
 	googleClientId: string;
 	googleClientSecret: string;
 	googleTokens: StoredTokens | null;
@@ -18,6 +20,8 @@ export interface SystemRecordingSettings {
 export const DEFAULT_SETTINGS: SystemRecordingSettings = {
 	recordingFolder: "recordings",
 	fileNameTemplate: "recording-YYYY-MM-DD-HHmmss",
+	meetingsFolder: "Meetings",
+	retentionDays: 30,
 	googleClientId: "",
 	googleClientSecret: "",
 	googleTokens: null,
@@ -64,6 +68,33 @@ export class SystemRecordingSettingTab extends PluginSettingTab {
                         await this.plugin.saveSettings();
                     })
             );
+
+        new Setting(containerEl)
+            .setName(s.settings.meetingsFolder.name)
+            .setDesc(s.settings.meetingsFolder.desc)
+            .addText((text) =>
+                text
+                    .setPlaceholder(s.settings.meetingsFolder.placeholder)
+                    .setValue(this.plugin.settings.meetingsFolder)
+                    .onChange(async (value) => {
+                        this.plugin.settings.meetingsFolder = value.trim() || "Meetings";
+                        await this.plugin.saveSettings();
+                    })
+            );
+
+        new Setting(containerEl)
+            .setName(s.settings.retentionDays.name)
+            .setDesc(s.settings.retentionDays.desc)
+            .addText((text) => {
+                text.inputEl.type = "number";
+                text
+                    .setValue(String(this.plugin.settings.retentionDays))
+                    .onChange(async (value) => {
+                        const n = Number.parseInt(value, 10);
+                        this.plugin.settings.retentionDays = Number.isFinite(n) && n >= 0 ? n : 0;
+                        await this.plugin.saveSettings();
+                    });
+            });
 
 		new Setting(containerEl).setName(s.settings.calendarHeading).setHeading();
 
