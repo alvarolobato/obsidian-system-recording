@@ -10,6 +10,8 @@ export const en = {
 		authenticateCalendar: "Authenticate calendar",
 		toggleCalendarAutoRecording: "Toggle calendar auto-recording",
 		openAgenda: "Open meeting agenda",
+		enrichNote: "Enrich meeting note (AI)",
+		toggleAiNotes: "Toggle AI notes visibility",
 	},
 	notices: {
 		autoRecordEnabled: "Calendar auto-recording enabled",
@@ -25,6 +27,16 @@ export const en = {
 		recordingSaved: "Recording saved",
 		unknownError: "Unknown error",
 		transcriptAdded: (note: string) => `Transcript added to ${note}`,
+		enriching: "Enriching meeting note…",
+		enrichDone: (note: string) => `Enriched ${note}`,
+		enrichError: (msg: string) => `Enrichment failed: ${msg}`,
+		enrichNotConfigured:
+			"Set the enrichment base URL, API key and model in settings first.",
+		enrichDisabled: "AI enrichment is disabled in settings.",
+		nothingToEnrich: "No notes or transcript to enrich in this note.",
+		notAMeetingNote: "Open a meeting note to enrich it.",
+		aiNotesHidden: "AI notes hidden",
+		aiNotesShown: "AI notes shown",
 	},
 	statusBar: {
 		recording: (hms: string) => `Recording ${hms}`,
@@ -73,6 +85,7 @@ export const en = {
 			copyLink: "Copy meeting link",
 			openRecording: "Open recording",
 			transcribe: "Transcribe recording",
+			enrich: "Enrich with AI",
 			skipToday: "Hide for today",
 		},
 		notices: {
@@ -153,6 +166,31 @@ export const en = {
 		agendaLookBack: {
 			name: "Agenda look-back (days)",
 			desc: "How many past days you can navigate back to in the agenda (0–30).",
+		},
+		enrichHeading: "AI enrichment",
+		enableEnrichment: {
+			name: "Enable AI enrichment",
+			desc: "Allow generating an AI notes summary from your notes and the transcript.",
+		},
+		enrichBaseUrl: {
+			name: "API base URL",
+			desc: "OpenAI-compatible endpoint (OpenAI, Azure, a LiteLLM proxy, Ollama, …). The /chat/completions path is appended.",
+		},
+		enrichApiKey: {
+			name: "API key",
+			desc: "Sent as a Bearer token. Stored in this vault's plugin data.",
+		},
+		enrichModel: {
+			name: "Model",
+			desc: "Chat model name, e.g. gpt-4o.",
+		},
+		enrichOnTranscribe: {
+			name: "Enrich automatically after transcription",
+			desc: "Run enrichment as soon as a transcript is inserted. Off by default to avoid unexpected API calls.",
+		},
+		enrichPrompt: {
+			name: "Enrichment prompt",
+			desc: "Prompt sent to the model. Placeholders: {{title}}, {{date}}, {{attendees}}, {{notes}}, {{transcript}}.",
 		},
 	},
 	oauth: {

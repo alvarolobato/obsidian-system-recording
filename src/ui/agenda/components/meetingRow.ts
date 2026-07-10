@@ -14,6 +14,7 @@ export interface RowHandlers {
 	onStop: () => void;
 	onOpenRecording: (m: AgendaMeeting) => void;
 	onTranscribe: (m: AgendaMeeting) => void;
+	onEnrich: (m: AgendaMeeting) => void;
 	onOpenLink: ((m: AgendaMeeting) => void) | null;
 	onCopyLink: ((m: AgendaMeeting) => void) | null;
 	onSkip: (m: AgendaMeeting) => void;
@@ -108,6 +109,12 @@ export function renderMeetingRow(opts: MeetingRowOptions): void {
 		);
 	}
 
+	if (meeting.note && (meeting.status === "transcribed" || meeting.recording)) {
+		iconButton(trail, "sparkles", a.actions.enrich, () =>
+			handlers.onEnrich(meeting)
+		);
+	}
+
 	if (meeting.meetingUrl && handlers.onOpenLink) {
 		iconButton(trail, "video", a.actions.openLink, () =>
 			handlers.onOpenLink!(meeting)
@@ -174,6 +181,15 @@ export function buildRowContextMenu(
 				.setTitle(a.actions.transcribe)
 				.setIcon("captions")
 				.onClick(() => handlers.onTranscribe(meeting))
+		);
+	}
+
+	if (meeting.note) {
+		menu.addItem((item) =>
+			item
+				.setTitle(a.actions.enrich)
+				.setIcon("sparkles")
+				.onClick(() => handlers.onEnrich(meeting))
 		);
 	}
 

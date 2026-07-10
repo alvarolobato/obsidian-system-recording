@@ -597,3 +597,15 @@
 		min-width: auto;
 	}
 }
+
+/* AI-enriched notes: gray callout so manual notes (plain, white) stand out. */
+.callout[data-callout="ai-notes"] {
+	--callout-color: 136, 136, 136;
+	--callout-icon: lucide-sparkles;
+	background-color: rgba(136, 136, 136, 0.08);
+}
+
+/* "Toggle AI notes" command hides every enriched block. */
+.mc-hide-ai .callout[data-callout="ai-notes"] {
+	display: none;
+}

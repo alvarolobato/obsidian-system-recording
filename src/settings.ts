@@ -5,6 +5,7 @@ import {
 	DEFAULT_NOTE_TEMPLATE,
 	DEFAULT_TITLE_PATTERN,
 } from "./notes/meetingNote";
+import { DEFAULT_ENRICH_PROMPT } from "./enrich/prompt";
 import { t } from "./i18n";
 
 export interface SystemRecordingSettings {
@@ -24,6 +25,13 @@ export interface SystemRecordingSettings {
 	openMeetAutomatically: boolean;
 	agendaLookAheadDays: number;
 	agendaLookBackDays: number;
+	enableEnrichment: boolean;
+	enrichBaseUrl: string;
+	enrichApiKey: string;
+	enrichModel: string;
+	enrichPrompt: string;
+	enrichOnTranscribe: boolean;
+	hideAiNotes: boolean;
 }
 
 export const DEFAULT_SETTINGS: SystemRecordingSettings = {
@@ -43,6 +51,13 @@ export const DEFAULT_SETTINGS: SystemRecordingSettings = {
 	openMeetAutomatically: true,
 	agendaLookAheadDays: 7,
 	agendaLookBackDays: 7,
+	enableEnrichment: false,
+	enrichBaseUrl: "https://api.openai.com/v1",
+	enrichApiKey: "",
+	enrichModel: "gpt-4o",
+	enrichPrompt: DEFAULT_ENRICH_PROMPT,
+	enrichOnTranscribe: false,
+	hideAiNotes: false,
 };
 
 export class SystemRecordingSettingTab extends PluginSettingTab {
@@ -288,6 +303,84 @@ export class SystemRecordingSettingTab extends PluginSettingTab {
 						await this.plugin.saveSettings();
 						this.plugin.refreshAgenda();
 					});
+			});
+
+		new Setting(containerEl).setName(s.settings.enrichHeading).setHeading();
+
+		new Setting(containerEl)
+			.setName(s.settings.enableEnrichment.name)
+			.setDesc(s.settings.enableEnrichment.desc)
+			.addToggle((toggle) =>
+				toggle
+					.setValue(this.plugin.settings.enableEnrichment)
+					.onChange(async (value) => {
+						this.plugin.settings.enableEnrichment = value;
+						await this.plugin.saveSettings();
+					})
+			);
+
+		new Setting(containerEl)
+			.setName(s.settings.enrichBaseUrl.name)
+			.setDesc(s.settings.enrichBaseUrl.desc)
+			.addText((text) =>
+				text
+					.setPlaceholder("https://api.openai.com/v1")
+					.setValue(this.plugin.settings.enrichBaseUrl)
+					.onChange(async (value) => {
+						this.plugin.settings.enrichBaseUrl = value.trim();
+						await this.plugin.saveSettings();
+					})
+			);
+
+		new Setting(containerEl)
+			.setName(s.settings.enrichApiKey.name)
+			.setDesc(s.settings.enrichApiKey.desc)
+			.addText((text) => {
+				text.inputEl.type = "password";
+				text
+					.setValue(this.plugin.settings.enrichApiKey)
+					.onChange(async (value) => {
+						this.plugin.settings.enrichApiKey = value.trim();
+						await this.plugin.saveSettings();
+					});
+			});
+
+		new Setting(containerEl)
+			.setName(s.settings.enrichModel.name)
+			.setDesc(s.settings.enrichModel.desc)
+			.addText((text) =>
+				text
+					.setValue(this.plugin.settings.enrichModel)
+					.onChange(async (value) => {
+						this.plugin.settings.enrichModel = value.trim();
+						await this.plugin.saveSettings();
+					})
+			);
+
+		new Setting(containerEl)
+			.setName(s.settings.enrichOnTranscribe.name)
+			.setDesc(s.settings.enrichOnTranscribe.desc)
+			.addToggle((toggle) =>
+				toggle
+					.setValue(this.plugin.settings.enrichOnTranscribe)
+					.onChange(async (value) => {
+						this.plugin.settings.enrichOnTranscribe = value;
+						await this.plugin.saveSettings();
+					})
+			);
+
+		new Setting(containerEl)
+			.setName(s.settings.enrichPrompt.name)
+			.setDesc(s.settings.enrichPrompt.desc)
+			.addTextArea((ta) => {
+				ta.setValue(this.plugin.settings.enrichPrompt).onChange(
+					async (value) => {
+						this.plugin.settings.enrichPrompt =
+							value || DEFAULT_ENRICH_PROMPT;
+						await this.plugin.saveSettings();
+					}
+				);
+				ta.inputEl.addClass("meeting-copilot-template-input");
 			});
     }
 }

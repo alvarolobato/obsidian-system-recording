@@ -21,6 +21,14 @@ import {
     MeetingEventInfo,
     MeetingNoteConfig,
 } from "./notes/meetingNote";
+import {
+    extractSection,
+    extractTranscript,
+    HIDE_AI_CLASS,
+    withEnrichedBlock,
+} from "./notes/enrichedBlock";
+import { chatComplete } from "./enrich/llm";
+import { ENRICH_SYSTEM_PROMPT, fillPrompt } from "./enrich/prompt";
 import { t } from "./i18n";
 import { TypedEventBus } from "./util/events";
 import {
@@ -139,6 +147,21 @@ export default class SystemRecordingPlugin extends Plugin {
 				);
 			},
 		});
+
+		this.addCommand({
+			id: "enrich-meeting-note",
+			name: t().commands.enrichNote,
+			callback: () => void this.enrichActiveNote(),
+		});
+
+		this.addCommand({
+			id: "toggle-ai-notes",
+			name: t().commands.toggleAiNotes,
+			callback: () => void this.toggleAiNotes(),
+		});
+
+		// Restore the AI-notes visibility toggle from the last session.
+		document.body.toggleClass(HIDE_AI_CLASS, this.settings.hideAiNotes);
 
         // Recorder callbacks
         this.recorder.onStatus = (status: RecorderStatus) =>
@@ -464,6 +487,9 @@ export default class SystemRecordingPlugin extends Plugin {
             onStop: () => this.stopRecording(),
             onOpenRecording: (m) => void this.openRecording(m),
             onTranscribe: (m) => void this.transcribeRecording(m),
+            onEnrich: (m) => {
+                if (m.note) void this.enrichMeetingNote(m.note);
+            },
             onOpenLink: (url) => this.openMeetingLink(url),
             onCopyLink: (url) => void this.copyMeetingLink(url),
             openSettings: () => this.openPluginSettings(),
@@ -663,33 +689,124 @@ export default class SystemRecordingPlugin extends Plugin {
 
     /** Inserts a finished transcription into its meeting note, then refreshes the agenda. */
     private async handleTranscriptionCompleted(payload: unknown): Promise<void> {
+        let enrichTarget: TFile | null = null;
         try {
-            if (this.settings.insertTranscript) {
-                const p = (payload ?? {}) as {
-                    audioFile?: unknown;
-                    transcription?: unknown;
-                    file?: unknown;
-                };
-                const audio = p.audioFile;
-                const transcript =
-                    typeof p.transcription === "string" ? p.transcription : null;
-                if (audio instanceof TFile && transcript) {
-                    const note = findMeetingNoteForAudio(this.app, audio);
-                    // Skip if the transcriber already wrote into the meeting note.
-                    const already =
-                        p.file instanceof TFile &&
-                        note !== null &&
-                        p.file.path === note.path;
-                    if (note && !already) {
+            const p = (payload ?? {}) as {
+                audioFile?: unknown;
+                transcription?: unknown;
+                file?: unknown;
+            };
+            const audio = p.audioFile;
+            const transcript =
+                typeof p.transcription === "string" ? p.transcription : null;
+            if (audio instanceof TFile && transcript) {
+                const note = findMeetingNoteForAudio(this.app, audio);
+                // Skip if the transcriber already wrote into the meeting note.
+                const already =
+                    p.file instanceof TFile &&
+                    note !== null &&
+                    p.file.path === note.path;
+                if (note) {
+                    if (this.settings.insertTranscript && !already) {
                         await insertTranscript(this.app, note, transcript);
                         new Notice(t().notices.transcriptAdded(note.basename));
                     }
+                    enrichTarget = note;
                 }
             }
         } catch (e) {
             console.warn("Meeting Copilot: failed to insert transcript", e);
         }
         this.agendaEvents.emit("changed", undefined);
+
+        if (
+            enrichTarget &&
+            this.settings.enableEnrichment &&
+            this.settings.enrichOnTranscribe
+        ) {
+            await this.enrichMeetingNote(enrichTarget);
+        }
+    }
+
+    /** Enriches the active markdown note, if it is one. */
+    private async enrichActiveNote(): Promise<void> {
+        const file = this.app.workspace.getActiveFile();
+        if (!(file instanceof TFile) || file.extension !== "md") {
+            new Notice(t().notices.notAMeetingNote);
+            return;
+        }
+        await this.enrichMeetingNote(file);
+    }
+
+    /** Generates AI notes from the note's manual notes + transcript and inserts a gray callout. */
+    private async enrichMeetingNote(file: TFile): Promise<void> {
+        if (!this.settings.enableEnrichment) {
+            new Notice(t().notices.enrichDisabled);
+            return;
+        }
+        const { enrichBaseUrl, enrichApiKey, enrichModel } = this.settings;
+        if (!enrichBaseUrl || !enrichApiKey || !enrichModel) {
+            new Notice(t().notices.enrichNotConfigured);
+            return;
+        }
+
+        const content = await this.app.vault.read(file);
+        const notes = extractSection(content, "## Notes");
+        const transcript = extractTranscript(content);
+        if (!notes && !transcript) {
+            new Notice(t().notices.nothingToEnrich);
+            return;
+        }
+
+        const fm = (this.app.metadataCache.getFileCache(file)?.frontmatter ??
+            {}) as Record<string, unknown>;
+        const attendeesVal = fm["attendees"];
+        const titleVal = fm["title"];
+        const dateVal = fm["date"];
+        const ctx = {
+            title: typeof titleVal === "string" ? titleVal : file.basename,
+            date: typeof dateVal === "string" ? dateVal : "",
+            attendees: Array.isArray(attendeesVal)
+                ? attendeesVal.map((x) => String(x)).join(", ")
+                : "",
+            notes,
+            transcript,
+        };
+
+        new Notice(t().notices.enriching);
+        try {
+            const output = await chatComplete({
+                baseUrl: enrichBaseUrl,
+                apiKey: enrichApiKey,
+                model: enrichModel,
+                system: ENRICH_SYSTEM_PROMPT,
+                user: fillPrompt(this.settings.enrichPrompt, ctx),
+            });
+            // Re-read in case the note changed during the network call.
+            const current = await this.app.vault.read(file);
+            await this.app.vault.modify(file, withEnrichedBlock(current, output));
+            await this.app.fileManager.processFrontMatter(file, (f) => {
+                (f as Record<string, unknown>).status = "enriched";
+            });
+            new Notice(t().notices.enrichDone(file.basename));
+            this.agendaEvents.emit("changed", undefined);
+        } catch (e) {
+            new Notice(
+                t().notices.enrichError(e instanceof Error ? e.message : String(e))
+            );
+        }
+    }
+
+    /** Flips the vault-wide "hide AI notes" toggle and persists it. */
+    private async toggleAiNotes(): Promise<void> {
+        this.settings.hideAiNotes = !this.settings.hideAiNotes;
+        document.body.toggleClass(HIDE_AI_CLASS, this.settings.hideAiNotes);
+        await this.saveSettings();
+        new Notice(
+            this.settings.hideAiNotes
+                ? t().notices.aiNotesHidden
+                : t().notices.aiNotesShown
+        );
     }
 
     private async attachRecording(fileName: string) {
