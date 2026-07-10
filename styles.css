@@ -16,3 +16,584 @@
 .system-recording-notice-button {
     margin-inline-start: var(--size-4-2);
 }
+
+.meeting-copilot-template-input {
+    width: 100%;
+    font-family: var(--font-monospace);
+    resize: vertical;
+}
+
+/* =========================================================================
+ * Meeting agenda sidebar view.
+ * Portions adapted from obsidian-meetings-plus (0BSD):
+ * https://github.com/jabaho9523/obsidian-meetings-plus — see THIRD_PARTY_NOTICES.md.
+ * ========================================================================= */
+
+.meeting-copilot-container {
+	padding: 10px 12px;
+	display: flex;
+	flex-direction: column;
+	gap: 12px;
+	font-size: var(--font-ui-small);
+}
+
+.meeting-copilot-status {
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+}
+
+.meeting-copilot-status-top {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 8px;
+}
+
+.meeting-copilot-status-left {
+	display: flex;
+	flex-direction: column;
+	gap: 2px;
+	min-width: 0;
+}
+
+.meeting-copilot-status-title {
+	font-size: var(--font-ui-medium);
+	font-weight: 600;
+}
+
+.meeting-copilot-status-sub {
+	color: var(--text-muted);
+	font-size: var(--font-ui-smaller);
+}
+
+.meeting-copilot-status-actions {
+	display: flex;
+	gap: 4px;
+}
+
+.meeting-copilot-icon-btn {
+	background: transparent;
+	border: none;
+	color: var(--text-muted);
+	cursor: pointer;
+	padding: 6px 8px;
+	border-radius: 4px;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+}
+
+.meeting-copilot-icon-btn:hover {
+	background: var(--background-modifier-hover);
+	color: var(--text-normal);
+}
+
+.meeting-copilot-icon-btn:disabled {
+	opacity: 0.3;
+	cursor: default;
+}
+
+.meeting-copilot-error-row {
+	color: var(--text-error);
+	font-size: var(--font-ui-smaller);
+	border-left: 3px solid var(--text-error);
+	padding: 6px 8px;
+	border-radius: 4px;
+}
+
+.meeting-copilot-empty {
+	color: var(--text-muted);
+	text-align: center;
+	padding: 24px 0;
+}
+
+.meeting-copilot-empty-cta {
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	gap: 10px;
+	padding: 24px 8px;
+	color: var(--text-muted);
+	text-align: center;
+}
+
+.meeting-copilot-current {
+	border: 1px solid var(--interactive-accent);
+	border-radius: 8px;
+	padding: 12px;
+	background: var(--background-secondary);
+	display: flex;
+	flex-direction: column;
+	gap: 10px;
+}
+
+.meeting-copilot-current-top {
+	display: flex;
+	gap: 10px;
+	align-items: flex-start;
+}
+
+.meeting-copilot-current-info {
+	display: flex;
+	flex-direction: column;
+	gap: 2px;
+	flex: 1;
+	min-width: 0;
+}
+
+.meeting-copilot-current-status {
+	font-size: var(--font-ui-smaller);
+	color: var(--interactive-accent);
+	font-weight: 600;
+	text-transform: uppercase;
+	letter-spacing: 0.04em;
+}
+
+.meeting-copilot-current-title {
+	font-weight: 600;
+	font-size: var(--font-ui-medium);
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.meeting-copilot-current-time {
+	color: var(--text-muted);
+	font-size: var(--font-ui-smaller);
+}
+
+.meeting-copilot-current-actions {
+	display: flex;
+	gap: 6px;
+	align-items: center;
+}
+
+.meeting-copilot-current-cta {
+	flex: 1;
+	padding: 8px 12px;
+	border-radius: 6px;
+	border: none;
+	background: var(--interactive-accent);
+	color: var(--text-on-accent);
+	cursor: pointer;
+	font-weight: 500;
+}
+
+.meeting-copilot-current-cta:hover {
+	background: var(--interactive-accent-hover);
+}
+
+.meeting-copilot-current-cta-danger {
+	background: var(--text-error);
+}
+
+.meeting-copilot-current-link {
+	background: transparent;
+	border: 1px solid var(--background-modifier-border);
+	color: var(--text-muted);
+	padding: 6px 10px;
+	border-radius: 6px;
+	cursor: pointer;
+	display: inline-flex;
+	align-items: center;
+}
+
+.meeting-copilot-current-link:hover {
+	background: var(--background-modifier-hover);
+	color: var(--text-normal);
+}
+
+/* date navigator strip */
+.meeting-copilot-datebar {
+	display: flex;
+	align-items: center;
+	gap: 4px;
+	padding: 4px 0;
+	border-top: 1px solid var(--background-modifier-border);
+	border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.meeting-copilot-datebar-label {
+	flex: 1;
+	background: transparent;
+	border: none;
+	color: var(--text-normal);
+	font-weight: 500;
+	font-size: var(--font-ui-small);
+	padding: 6px 8px;
+	border-radius: 4px;
+	cursor: pointer;
+	text-align: center;
+}
+
+.meeting-copilot-datebar-label:hover {
+	background: var(--background-modifier-hover);
+}
+
+.meeting-copilot-datebar-today,
+.meeting-copilot-datebar-days {
+	background: transparent;
+	border: 1px solid var(--background-modifier-border);
+	color: var(--text-muted);
+	font-size: var(--font-ui-smaller);
+	padding: 4px 8px;
+	border-radius: 999px;
+	cursor: pointer;
+}
+
+.meeting-copilot-datebar-days {
+	min-width: 36px;
+	text-align: center;
+}
+
+.meeting-copilot-datebar-today:hover,
+.meeting-copilot-datebar-days:hover {
+	background: var(--background-modifier-hover);
+	color: var(--text-normal);
+}
+
+.meeting-copilot-datebar-days-input {
+	width: 48px;
+	padding: 4px 6px;
+	border-radius: 999px;
+	border: 1px solid var(--interactive-accent);
+	background: var(--background-primary);
+	color: var(--text-normal);
+	font-size: var(--font-ui-smaller);
+	text-align: center;
+}
+
+/* custom calendar picker (anchored under the date label) */
+.meeting-copilot-picker {
+	background: var(--background-primary);
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 6px;
+	padding: 10px;
+	box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
+	width: 252px;
+	user-select: none;
+	font-size: var(--font-ui-small);
+}
+
+.meeting-copilot-picker-floating {
+	position: fixed;
+	left: var(--mc-picker-left, 0);
+	top: var(--mc-picker-top, 0);
+	z-index: 9999;
+}
+
+.meeting-copilot-picker-header {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	margin-bottom: 8px;
+}
+
+.meeting-copilot-picker-nav {
+	background: transparent;
+	border: none;
+	padding: 4px 6px;
+	cursor: pointer;
+	color: var(--text-muted);
+	border-radius: 4px;
+	display: inline-flex;
+}
+
+.meeting-copilot-picker-nav:hover {
+	background: var(--background-modifier-hover);
+	color: var(--text-normal);
+}
+
+.meeting-copilot-picker-month {
+	font-weight: 600;
+}
+
+.meeting-copilot-picker-daynames,
+.meeting-copilot-picker-grid {
+	display: grid;
+	grid-template-columns: repeat(7, 1fr);
+	gap: 2px;
+}
+
+.meeting-copilot-picker-daynames {
+	margin-bottom: 4px;
+}
+
+.meeting-copilot-picker-dayname {
+	text-align: center;
+	color: var(--text-faint);
+	font-size: var(--font-ui-smaller);
+	padding: 2px 0;
+}
+
+.meeting-copilot-picker-cell {
+	background: transparent;
+	border: 1px solid transparent;
+	padding: 8px 0;
+	border-radius: 4px;
+	cursor: pointer;
+	color: var(--text-normal);
+	font-size: var(--font-ui-small);
+	position: relative;
+	min-height: 32px;
+}
+
+.meeting-copilot-picker-cell:hover:not(:disabled) {
+	background: var(--background-modifier-hover);
+}
+
+.meeting-copilot-picker-cell:disabled {
+	color: var(--text-faint);
+	cursor: default;
+	opacity: 0.4;
+}
+
+.meeting-copilot-picker-other-month {
+	color: var(--text-faint);
+}
+
+.meeting-copilot-picker-past {
+	color: var(--text-muted);
+}
+
+.meeting-copilot-picker-today {
+	color: var(--interactive-accent);
+	font-weight: 600;
+}
+
+.meeting-copilot-picker-focused {
+	background: var(--interactive-accent);
+	color: var(--text-on-accent);
+}
+
+.meeting-copilot-picker-focused:hover:not(:disabled) {
+	background: var(--interactive-accent-hover);
+}
+
+.meeting-copilot-picker-hasevents::after {
+	content: "";
+	position: absolute;
+	bottom: 3px;
+	left: 50%;
+	transform: translateX(-50%);
+	width: 4px;
+	height: 4px;
+	border-radius: 50%;
+	background: var(--interactive-accent);
+}
+
+.meeting-copilot-picker-focused.meeting-copilot-picker-hasevents::after {
+	background: var(--text-on-accent);
+}
+
+/* agenda — flat per-day */
+.meeting-copilot-agenda {
+	display: flex;
+	flex-direction: column;
+	gap: 14px;
+}
+
+.meeting-copilot-day {
+	display: flex;
+	flex-direction: column;
+	gap: 2px;
+}
+
+.meeting-copilot-day-today {
+	background: var(--background-secondary);
+	border-radius: 6px;
+	padding: 8px 8px 6px;
+	margin: 0 -8px;
+}
+
+.meeting-copilot-day-past {
+	opacity: 0.75;
+}
+
+.meeting-copilot-day-past:hover {
+	opacity: 1;
+}
+
+.meeting-copilot-day-today .meeting-copilot-day-label {
+	color: var(--interactive-accent);
+}
+
+.meeting-copilot-day-header {
+	display: flex;
+	align-items: baseline;
+	gap: 8px;
+	padding: 0 2px 4px;
+	border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.meeting-copilot-day-label {
+	font-weight: 600;
+	font-size: var(--font-ui-small);
+	color: var(--text-normal);
+}
+
+.meeting-copilot-day-body {
+	display: flex;
+	flex-direction: column;
+}
+
+.meeting-copilot-day-empty-inline {
+	color: var(--text-muted);
+	font-size: var(--font-ui-smaller);
+	padding: 6px 2px 0;
+	font-style: italic;
+}
+
+.meeting-copilot-empty-run {
+	color: var(--text-faint);
+	font-size: var(--font-ui-smaller);
+	padding: 6px 2px;
+	text-align: center;
+	font-style: italic;
+}
+
+/* rows */
+.meeting-copilot-row {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	padding: 8px 10px;
+	min-height: 44px;
+	border-bottom: 1px solid var(--background-modifier-border);
+	cursor: pointer;
+}
+
+.meeting-copilot-row:last-child {
+	border-bottom: none;
+}
+
+.meeting-copilot-row:hover {
+	background: var(--background-modifier-hover);
+}
+
+.meeting-copilot-row-has-note .meeting-copilot-row-title {
+	color: var(--text-muted);
+}
+
+.meeting-copilot-calendar-dot {
+	width: 8px;
+	height: 8px;
+	border-radius: 50%;
+	flex-shrink: 0;
+	background: var(--text-muted);
+}
+
+.meeting-copilot-dot-recorded {
+	background: var(--interactive-accent);
+}
+
+.meeting-copilot-row-time {
+	color: var(--text-muted);
+	font-variant-numeric: tabular-nums;
+	font-size: var(--font-ui-smaller);
+	min-width: 96px;
+	flex-shrink: 0;
+}
+
+.meeting-copilot-row-main {
+	flex: 1;
+	min-width: 0;
+}
+
+.meeting-copilot-row-title {
+	font-weight: 500;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.meeting-copilot-row-meta {
+	color: var(--text-muted);
+	font-size: var(--font-ui-smaller);
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.meeting-copilot-row-trail {
+	display: flex;
+	gap: 2px;
+	color: var(--text-muted);
+	flex-shrink: 0;
+}
+
+.meeting-copilot-row-action {
+	background: transparent;
+	border: none;
+	color: var(--text-muted);
+	cursor: pointer;
+	padding: 4px 6px;
+	border-radius: 4px;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+}
+
+.meeting-copilot-row-action:hover {
+	background: var(--background-modifier-hover);
+	color: var(--text-normal);
+}
+
+.meeting-copilot-row-action-danger:hover {
+	color: var(--text-error);
+}
+
+/* "Earlier today" mini-collapsible inside the today section */
+.meeting-copilot-earlier-section {
+	display: flex;
+	flex-direction: column;
+	margin-top: 6px;
+}
+
+.meeting-copilot-earlier-header {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	padding: 4px 2px;
+	cursor: pointer;
+	color: var(--text-muted);
+	font-size: var(--font-ui-smaller);
+	user-select: none;
+}
+
+.meeting-copilot-earlier-header:hover {
+	color: var(--text-normal);
+}
+
+.meeting-copilot-chevron {
+	display: inline-flex;
+	transition: transform 120ms ease;
+}
+
+.meeting-copilot-collapsed .meeting-copilot-chevron {
+	transform: rotate(-90deg);
+}
+
+.meeting-copilot-earlier-section.meeting-copilot-collapsed .meeting-copilot-earlier-body {
+	display: none;
+}
+
+.meeting-copilot-section-count {
+	background: var(--background-modifier-border);
+	color: var(--text-muted);
+	border-radius: 10px;
+	padding: 1px 8px;
+	font-size: var(--font-ui-smaller);
+}
+
+/* mobile */
+@media (max-width: 480px) {
+	.meeting-copilot-row {
+		flex-wrap: wrap;
+		gap: 6px;
+	}
+	.meeting-copilot-row-time {
+		min-width: auto;
+	}
+}

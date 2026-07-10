@@ -74,8 +74,13 @@ export class Recorder {
             this._isRecording = false;
             this.process = null;
             this.stopFilePath = null;
-            if (wasRecording && code !== 0 && code !== null) {
+            if (!wasRecording) return;
+            if (code !== 0 && code !== null) {
                 this.onError?.(`Process exited with code ${code}`);
+            } else {
+                // Exited without emitting a terminal "stopped"/"error" line;
+                // surface a terminal status so the UI resets.
+                this.onStatus?.({ status: "stopped" });
             }
         });
 

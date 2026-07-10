@@ -2,7 +2,7 @@
 
 Calendar-driven meeting notes for Obsidian on macOS: reads your Google Calendar, creates a meeting note from the invite, and records **dual-channel** audio (system audio from Zoom / Google Meet / Teams **plus** your microphone) via ScreenCaptureKit — no extra audio driver, no sidecar app.
 
-> **Attribution.** Meeting Copilot is a fork of **[System Recording](https://github.com/yut0takagi/obsidian-system-recording)** by **Yuto Takagi** (0BSD). The dual-channel ScreenCaptureKit recorder and the Google Calendar integration come from that project. See [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) for full credits.
+> **Attribution.** Meeting Copilot is a fork of **[System Recording](https://github.com/yut0takagi/obsidian-system-recording)** by **Yuto Takagi** (0BSD). The dual-channel ScreenCaptureKit recorder and the Google Calendar integration come from that project. The meeting agenda sidebar is adapted from **[Meetings Plus](https://github.com/jabaho9523/obsidian-meetings-plus)** by **Jacob Holm** (0BSD). See [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) for full credits.
 
 ## Requirements
 
@@ -14,8 +14,9 @@ Calendar-driven meeting notes for Obsidian on macOS: reads your Google Calendar,
 - System-audio capture via ScreenCaptureKit (no extra driver)
 - Simultaneous microphone capture (dual-channel mix)
 - Google Calendar integration: upcoming events, attendees, and Meet/Zoom link extraction
+- **Meeting agenda sidebar**: Granola-style "coming up / recent" list with per-row actions (create note + record, open note, transcribe, open recording, join link)
 - Creates a meeting note from the invite and colocates the recording with it
-- Recurring meetings organized into a per-series folder; recording retention setting
+- Recurring meetings organized into a per-series folder
 - Ribbon button / command palette control; elapsed-time indicator in the status bar
 
 ## Installation (manual)

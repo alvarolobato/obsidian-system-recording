@@ -29,11 +29,35 @@ OR PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTIO
 ARISING OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 ```
 
-## Planned adaptations (not yet incorporated)
+## Meetings Plus (agenda sidebar view)
 
-The meeting agenda sidebar view will adapt UI code from:
+- Author: Jacob Holm
+- Source: https://github.com/jabaho9523/obsidian-meetings-plus
+- License: 0BSD
 
-- **Meetings Plus** — Jacob Holm — https://github.com/jabaho9523/obsidian-meetings-plus — 0BSD
-- **Day Planner** (view registration/activation patterns) — Ivan Lednev — https://github.com/ivan-lednev/obsidian-day-planner — MIT
+The meeting agenda sidebar view is adapted from Meetings Plus. Specifically, the
+following files carry adapted code (and each has an attribution header):
 
-Per-file attribution headers will be added to any adapted files when that code lands.
+- `src/ui/agenda/MeetingAgendaView.ts` (agenda layout, day grouping, empty-run
+  collapsing, "earlier today" section) — from `src/ui/MeetingsPlusView.ts`
+- `src/ui/agenda/components/statusHeader.ts` — from `src/ui/components/status-header.ts`
+- `src/ui/agenda/components/datePicker.ts` — from `src/ui/components/date-picker.ts`
+- `src/ui/agenda/components/meetingRow.ts` — from `src/ui/components/meeting-row.ts`
+- `src/ui/agenda/components/currentMeeting.ts` — from `src/ui/components/current-meeting.ts`
+- `src/util/events.ts` — from `src/util/events.ts`
+- `src/calendar/meetingUrl.ts` (provider URL regexes) — from `src/calendar/parser.ts`
+- The `meeting-copilot-*` rules in `styles.css` — from Meetings Plus `styles.css`
+
+```
+Meetings Plus is distributed under the 0BSD license, which imposes no
+attribution requirement; this credit is provided as a courtesy.
+```
+
+## Day Planner (reference only)
+
+- Author: Ivan Lednev
+- Source: https://github.com/ivan-lednev/obsidian-day-planner
+- License: MIT
+
+Used only as a reference for the Obsidian `registerView` + right-sidebar
+activation pattern. No source code was copied.

@@ -1,12 +1,18 @@
 import { App, PluginSettingTab, Setting } from "obsidian";
 import SystemRecordingPlugin from "./main";
 import type { StoredTokens } from "./auth/googleOAuth";
+import {
+	DEFAULT_NOTE_TEMPLATE,
+	DEFAULT_TITLE_PATTERN,
+} from "./notes/meetingNote";
 import { t } from "./i18n";
 
 export interface SystemRecordingSettings {
 	recordingFolder: string;
 	fileNameTemplate: string;
 	meetingsFolder: string;
+	noteTitlePattern: string;
+	noteTemplate: string;
 	retentionDays: number;
 	googleClientId: string;
 	googleClientSecret: string;
@@ -15,12 +21,16 @@ export interface SystemRecordingSettings {
 	calendarId: string;
 	exclusionKeywords: string;
 	openMeetAutomatically: boolean;
+	agendaLookAheadDays: number;
+	agendaLookBackDays: number;
 }
 
 export const DEFAULT_SETTINGS: SystemRecordingSettings = {
 	recordingFolder: "recordings",
 	fileNameTemplate: "recording-YYYY-MM-DD-HHmmss",
 	meetingsFolder: "Meetings",
+	noteTitlePattern: DEFAULT_TITLE_PATTERN,
+	noteTemplate: DEFAULT_NOTE_TEMPLATE,
 	retentionDays: 30,
 	googleClientId: "",
 	googleClientSecret: "",
@@ -29,6 +39,8 @@ export const DEFAULT_SETTINGS: SystemRecordingSettings = {
 	calendarId: "primary",
 	exclusionKeywords: "",
 	openMeetAutomatically: true,
+	agendaLookAheadDays: 7,
+	agendaLookBackDays: 7,
 };
 
 export class SystemRecordingSettingTab extends PluginSettingTab {
@@ -81,6 +93,35 @@ export class SystemRecordingSettingTab extends PluginSettingTab {
                         await this.plugin.saveSettings();
                     })
             );
+
+        new Setting(containerEl)
+            .setName(s.settings.noteTitlePattern.name)
+            .setDesc(s.settings.noteTitlePattern.desc)
+            .addText((text) =>
+                text
+                    .setPlaceholder(DEFAULT_TITLE_PATTERN)
+                    .setValue(this.plugin.settings.noteTitlePattern)
+                    .onChange(async (value) => {
+                        this.plugin.settings.noteTitlePattern =
+                            value.trim() || DEFAULT_TITLE_PATTERN;
+                        await this.plugin.saveSettings();
+                    })
+            );
+
+        new Setting(containerEl)
+            .setName(s.settings.noteTemplate.name)
+            .setDesc(s.settings.noteTemplate.desc)
+            .addTextArea((ta) => {
+                ta.setValue(this.plugin.settings.noteTemplate).onChange(
+                    async (value) => {
+                        this.plugin.settings.noteTemplate =
+                            value || DEFAULT_NOTE_TEMPLATE;
+                        await this.plugin.saveSettings();
+                    }
+                );
+                ta.inputEl.rows = 12;
+                ta.inputEl.addClass("meeting-copilot-template-input");
+            });
 
         new Setting(containerEl)
             .setName(s.settings.retentionDays.name)
@@ -176,14 +217,20 @@ export class SystemRecordingSettingTab extends PluginSettingTab {
 		new Setting(containerEl)
 			.setName(s.settings.exclusionKeywords.name)
 			.setDesc(s.settings.exclusionKeywords.desc)
-			.addTextArea((ta) =>
+			.addTextArea((ta) => {
 				ta
 					.setValue(this.plugin.settings.exclusionKeywords)
 					.onChange(async (value) => {
 						this.plugin.settings.exclusionKeywords = value;
 						await this.plugin.saveSettings();
-					})
-			);
+					});
+				// Re-poll and refresh the agenda once editing ends so newly
+				// excluded events drop out without waiting for the next poll.
+				this.plugin.registerDomEvent(ta.inputEl, "blur", () => {
+					this.plugin.refreshCalendarNow();
+					this.plugin.refreshAgenda();
+				});
+			});
 
 		new Setting(containerEl)
 			.setName(s.settings.openMeet.name)
@@ -196,5 +243,37 @@ export class SystemRecordingSettingTab extends PluginSettingTab {
 						await this.plugin.saveSettings();
 					})
 			);
+
+		new Setting(containerEl)
+			.setName(s.settings.agendaLookAhead.name)
+			.setDesc(s.settings.agendaLookAhead.desc)
+			.addText((text) => {
+				text.inputEl.type = "number";
+				text
+					.setValue(String(this.plugin.settings.agendaLookAheadDays))
+					.onChange(async (value) => {
+						const n = Number.parseInt(value, 10);
+						this.plugin.settings.agendaLookAheadDays =
+							Number.isFinite(n) && n >= 1 ? Math.min(n, 180) : 7;
+						await this.plugin.saveSettings();
+						this.plugin.refreshAgenda();
+					});
+			});
+
+		new Setting(containerEl)
+			.setName(s.settings.agendaLookBack.name)
+			.setDesc(s.settings.agendaLookBack.desc)
+			.addText((text) => {
+				text.inputEl.type = "number";
+				text
+					.setValue(String(this.plugin.settings.agendaLookBackDays))
+					.onChange(async (value) => {
+						const n = Number.parseInt(value, 10);
+						this.plugin.settings.agendaLookBackDays =
+							Number.isFinite(n) && n >= 0 ? Math.min(n, 30) : 7;
+						await this.plugin.saveSettings();
+						this.plugin.refreshAgenda();
+					});
+			});
     }
 }

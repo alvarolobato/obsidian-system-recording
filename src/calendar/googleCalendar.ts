@@ -1,6 +1,8 @@
 import { requestUrl } from "obsidian";
 import type { GoogleOAuth } from "../auth/googleOAuth";
 import { extractMeetLink, RawConferenceEvent } from "./meetLink";
+import { extractMeetingUrlFromText } from "./meetingUrl";
+import { isMeetingEventType, matchesExclusionKeyword } from "./eventFilter";
 
 export interface GCalEvent {
 	id: string;
@@ -38,7 +40,9 @@ interface RawAttendee {
 interface RawEvent extends RawConferenceEvent {
 	id?: string;
 	summary?: string;
+	eventType?: string;
 	location?: string;
+	description?: string;
 	htmlLink?: string;
 	iCalUID?: string;
 	recurringEventId?: string;
@@ -86,7 +90,8 @@ export async function listEvents(
 	calendarId: string,
 	timeMin: Date,
 	timeMax: Date,
-	maxResults = 50
+	maxResults = 50,
+	exclusionKeywords: string[] = []
 ): Promise<GCalEvent[]> {
 	const params = new URLSearchParams({
 		timeMin: timeMin.toISOString(),
@@ -97,7 +102,11 @@ export async function listEvents(
 	}).toString();
 	const url = `${API}/calendars/${encodeURIComponent(calendarId)}/events?${params}`;
 	const json = (await authedGet(oauth, url)) as { items?: RawEvent[] };
-	return (json.items ?? []).map((ev) => {
+	return (json.items ?? [])
+		.filter((ev) => isMeetingEventType(ev.eventType))
+		.filter((ev) => !ev.start?.date) // drop all-day events (date-only start)
+		.filter((ev) => !matchesExclusionKeyword(ev.summary ?? "", exclusionKeywords))
+		.map((ev) => {
 		const isAllDay = !!ev.start?.date;
 		const start = isAllDay
 			? new Date((ev.start?.date ?? "") + "T00:00:00")
@@ -114,7 +123,9 @@ export async function listEvents(
 			start,
 			end,
 			allDay: isAllDay,
-			meetLink: extractMeetLink(ev),
+			meetLink:
+				extractMeetLink(ev) ??
+				extractMeetingUrlFromText(ev.location, ev.description),
 			htmlLink: ev.htmlLink ?? "",
 			attendees: mapAttendees(ev.attendees),
 			organizer,

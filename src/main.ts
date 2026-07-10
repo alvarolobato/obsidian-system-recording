@@ -10,15 +10,30 @@ import { nodeDeps, resolveBinaryPath } from "./binary-runtime";
 import * as path from "path";
 import { GoogleOAuth } from "./auth/googleOAuth";
 import { listEvents } from "./calendar/googleCalendar";
-import { shouldRecord, parseKeywords } from "./calendar/eventFilter";
+import { parseKeywords } from "./calendar/eventFilter";
 import { CalendarScheduler, ScheduledEvent } from "./calendar/scheduler";
 import { actionNotice } from "./ui/actionNotice";
 import {
     createMeetingNote,
     linkRecording,
     MeetingEventInfo,
+    MeetingNoteConfig,
 } from "./notes/meetingNote";
 import { t } from "./i18n";
+import { TypedEventBus } from "./util/events";
+import {
+    AgendaMeeting,
+    buildNoteIndex,
+    toAgendaMeeting,
+    toMeetingInfo as agendaToMeetingInfo,
+} from "./ui/agenda/agendaModel";
+import {
+    AgendaViewEvents,
+    AgendaViewHost,
+    MeetingAgendaView,
+    VIEW_TYPE_AGENDA,
+    AGENDA_ICON,
+} from "./ui/agenda/MeetingAgendaView";
 
 export default class SystemRecordingPlugin extends Plugin {
     settings: SystemRecordingSettings;
@@ -44,6 +59,9 @@ export default class SystemRecordingPlugin extends Plugin {
 	private scheduler: CalendarScheduler | null = null;
 	/** Note the in-progress recording belongs to, so we can link it back on stop. */
 	private currentMeetingNotePath: string | null = null;
+	/** Calendar event id of the in-progress meeting recording, for agenda state. */
+	private currentRecordingEventId: string | null = null;
+	private agendaEvents = new TypedEventBus<AgendaViewEvents>();
 
     async onload() {
         await this.loadSettings();
@@ -53,6 +71,29 @@ export default class SystemRecordingPlugin extends Plugin {
             "microphone",
             t().ribbon.toggleRecording,
             () => this.toggleRecording()
+        );
+
+        // Meeting agenda sidebar view
+        this.registerView(
+            VIEW_TYPE_AGENDA,
+            (leaf) => new MeetingAgendaView(leaf, this.agendaHost())
+        );
+        this.addRibbonIcon(AGENDA_ICON, t().ribbon.openAgenda, () =>
+            void this.openAgenda()
+        );
+        this.addCommand({
+            id: "open-agenda",
+            name: t().commands.openAgenda,
+            callback: () => void this.openAgenda(),
+        });
+
+        // Refresh the agenda when a transcription finishes (ai-transcriber emits this).
+        this.registerEvent(
+            this.app.workspace.on(
+                // Custom event from the AI Transcriber plugin.
+                "transcription:completed" as never,
+                () => this.agendaEvents.emit("changed", undefined)
+            )
         );
 
         // Status bar
@@ -99,8 +140,13 @@ export default class SystemRecordingPlugin extends Plugin {
         // Recorder callbacks
         this.recorder.onStatus = (status: RecorderStatus) =>
             this.handleStatus(status);
-        this.recorder.onError = (message: string) =>
+        this.recorder.onError = (message: string) => {
             new Notice(t().notices.recordingError(message));
+            // Fatal failures (spawn error / non-zero exit) flip isRecording off
+            // before invoking onError; a stderr line while still recording is
+            // non-fatal, so only reset the UI when recording has truly stopped.
+            if (!this.recorder.isRecording) this.resetRecordingUi();
+        };
 
 		this.updateScheduler();
     }
@@ -111,6 +157,7 @@ export default class SystemRecordingPlugin extends Plugin {
         }
         this.clearDurationTimer();
 		this.scheduler?.stop();
+		this.agendaEvents.clear();
     }
 
     async loadSettings() {
@@ -139,6 +186,7 @@ export default class SystemRecordingPlugin extends Plugin {
         folder: string;
         basename: string;
         notePath: string;
+        eventId?: string;
     }) {
         if (this.recorder.isRecording) {
             new Notice(t().notices.alreadyRecording);
@@ -185,14 +233,16 @@ export default class SystemRecordingPlugin extends Plugin {
                     meeting.basename
                 );
                 this.currentMeetingNotePath = meeting.notePath;
+                this.currentRecordingEventId = meeting.eventId ?? null;
             } else {
                 const folder = this.settings.recordingFolder;
                 if (!(await adapter.exists(folder))) {
                     await adapter.mkdir(folder);
                 }
                 const fileName = this.formatFileName(this.settings.fileNameTemplate);
-                relativePath = `${folder}/${fileName}.wav`;
+                relativePath = await this.uniqueWavPath(adapter, folder, fileName);
                 this.currentMeetingNotePath = null;
+                this.currentRecordingEventId = null;
             }
 
             const vaultBasePath =
@@ -204,6 +254,7 @@ export default class SystemRecordingPlugin extends Plugin {
             this.recordingStartTime = Date.now();
             this.startDurationTimer();
             this.updateRibbonIcon(true);
+            this.agendaEvents.emit("changed", undefined);
 
             new Notice(t().notices.recordingStarted);
         } finally {
@@ -270,24 +321,23 @@ export default class SystemRecordingPlugin extends Plugin {
 			this.oauth,
 			this.settings.calendarId,
 			new Date(minMs),
-			new Date(maxMs)
+			new Date(maxMs),
+			250,
+			parseKeywords(this.settings.exclusionKeywords)
 		);
-		const keywords = parseKeywords(this.settings.exclusionKeywords);
-		return events
-			.filter((e) => shouldRecord({ summary: e.summary, allDay: e.allDay }, keywords))
-			.map((e) => ({
-				id: e.id,
-				summary: e.summary,
-				start: e.start.getTime(),
-				end: e.end.getTime(),
-				meetLink: e.meetLink,
-				location: e.location,
-				htmlLink: e.htmlLink,
-				attendees: e.attendees,
-				organizer: e.organizer,
-				iCalUID: e.iCalUID,
-				recurringEventId: e.recurringEventId,
-			}));
+		return events.map((e) => ({
+			id: e.id,
+			summary: e.summary,
+			start: e.start.getTime(),
+			end: e.end.getTime(),
+			meetLink: e.meetLink,
+			location: e.location,
+			htmlLink: e.htmlLink,
+			attendees: e.attendees,
+			organizer: e.organizer,
+			iCalUID: e.iCalUID,
+			recurringEventId: e.recurringEventId,
+		}));
 	}
 
 	private handleEventStart(event: ScheduledEvent): void {
@@ -304,32 +354,37 @@ export default class SystemRecordingPlugin extends Plugin {
 			t().event.started(event.summary),
 			t().event.createNoteAndRecord,
 			() => {
-				void this.startMeetingRecording(event);
+				void this.startMeetingRecording(this.toMeetingInfo(event));
 			}
 		);
 	}
 
 	/** Creates & opens the meeting note from calendar data, then records beside it. */
-	private async startMeetingRecording(event: ScheduledEvent): Promise<void> {
+	private async startMeetingRecording(info: MeetingEventInfo): Promise<void> {
 		if (!Platform.isMacOS) {
 			new Notice(t().notices.macOnly);
 			return;
 		}
 		try {
-			const ref = await createMeetingNote(
-				this.app,
-				this.settings.meetingsFolder,
-				this.toMeetingInfo(event)
-			);
+			const ref = await createMeetingNote(this.app, info, this.noteConfig());
 			await this.app.workspace.getLeaf(false).openFile(ref.file);
 			await this.startRecording({
 				folder: ref.folder,
 				basename: ref.basename,
 				notePath: ref.notePath,
+				eventId: info.id,
 			});
 		} catch (e) {
 			new Notice(t().notices.recordingError(e instanceof Error ? e.message : String(e)));
 		}
+	}
+
+	private noteConfig(): MeetingNoteConfig {
+		return {
+			baseFolder: this.settings.meetingsFolder,
+			titlePattern: this.settings.noteTitlePattern,
+			template: this.settings.noteTemplate,
+		};
 	}
 
 	private toMeetingInfo(e: ScheduledEvent): MeetingEventInfo {
@@ -349,6 +404,15 @@ export default class SystemRecordingPlugin extends Plugin {
 	}
 
 	private handleEventEnd(event: ScheduledEvent): void {
+		// Only offer to stop when *this* meeting's recording is the active one,
+		// so overlapping meetings can't stop the wrong recording (or prompt when
+		// nothing is being recorded).
+		if (
+			!this.recorder.isRecording ||
+			this.currentRecordingEventId !== event.id
+		) {
+			return;
+		}
 		actionNotice(
 			t().event.ended(event.summary),
 			t().event.stopRecordingAction,
@@ -358,23 +422,181 @@ export default class SystemRecordingPlugin extends Plugin {
 		);
 	}
 
+    // MARK: - Meeting agenda
+
+    /** Opens (or reveals) the agenda view in the right sidebar. */
+    async openAgenda(): Promise<void> {
+        const { workspace } = this.app;
+        let leaf = workspace.getLeavesOfType(VIEW_TYPE_AGENDA)[0] ?? null;
+        if (!leaf) {
+            leaf = workspace.getRightLeaf(false);
+            await leaf?.setViewState({ type: VIEW_TYPE_AGENDA, active: true });
+        }
+        if (leaf) void workspace.revealLeaf(leaf);
+    }
+
+    /** Tells any open agenda view to reload (e.g. after a settings change). */
+    refreshAgenda(): void {
+        this.agendaEvents.emit("changed", undefined);
+    }
+
+    private agendaHost(): AgendaViewHost {
+        return {
+            getLookAhead: () => this.settings.agendaLookAheadDays,
+            getLookBack: () => this.settings.agendaLookBackDays,
+            setLookAhead: (n) => {
+                this.settings.agendaLookAheadDays = n;
+                void this.saveSettings();
+            },
+            isAuthenticated: () => this.isCalendarAuthenticated(),
+            authenticate: () => this.authenticateCalendar(),
+            fetchMeetings: (fromMs, toMs) => this.fetchAgendaMeetings(fromMs, toMs),
+            isRecordingThis: (m) =>
+                this.recorder.isRecording &&
+                this.currentRecordingEventId === m.id,
+            onOpenOrCreate: (m) => void this.openOrCreateNote(m),
+            onCreateAndRecord: (m) =>
+                void this.startMeetingRecording(agendaToMeetingInfo(m)),
+            onCreateNote: (m) => void this.createNoteOnly(m),
+            onStop: () => this.stopRecording(),
+            onOpenRecording: (m) => void this.openRecording(m),
+            onTranscribe: (m) => void this.transcribeRecording(m),
+            onOpenLink: (url) => this.openMeetingLink(url),
+            onCopyLink: (url) => void this.copyMeetingLink(url),
+            openSettings: () => this.openPluginSettings(),
+            events: this.agendaEvents,
+        };
+    }
+
+    private async fetchAgendaMeetings(
+        fromMs: number,
+        toMs: number
+    ): Promise<AgendaMeeting[]> {
+        const events = await listEvents(
+            this.oauth,
+            this.settings.calendarId,
+            new Date(fromMs),
+            new Date(toMs),
+            250,
+            parseKeywords(this.settings.exclusionKeywords)
+        );
+        const index = buildNoteIndex(this.app);
+        return events
+            .map((e) => toAgendaMeeting(e, index))
+            .sort((a, b) => a.start.getTime() - b.start.getTime());
+    }
+
+    private async openOrCreateNote(m: AgendaMeeting): Promise<void> {
+        if (m.note) {
+            await this.app.workspace.getLeaf(false).openFile(m.note);
+            return;
+        }
+        await this.createNoteOnly(m);
+    }
+
+    private async createNoteOnly(m: AgendaMeeting): Promise<void> {
+        try {
+            const ref = await createMeetingNote(
+                this.app,
+                agendaToMeetingInfo(m),
+                this.noteConfig()
+            );
+            await this.app.workspace.getLeaf(false).openFile(ref.file);
+            this.agendaEvents.emit("changed", undefined);
+        } catch (e) {
+            new Notice(
+                t().notices.recordingError(
+                    e instanceof Error ? e.message : String(e)
+                )
+            );
+        }
+    }
+
+    private async openRecording(m: AgendaMeeting): Promise<void> {
+        if (!m.recording) {
+            new Notice(t().agenda.notices.noRecording);
+            return;
+        }
+        await this.app.workspace.getLeaf(false).openFile(m.recording);
+    }
+
+    /** Opens the recording, then hands off to the AI Transcriber plugin if present. */
+    private async transcribeRecording(m: AgendaMeeting): Promise<void> {
+        if (!m.recording) {
+            new Notice(t().agenda.notices.noRecording);
+            return;
+        }
+        await this.app.workspace.getLeaf(false).openFile(m.recording);
+        const commands = (
+            this.app as unknown as {
+                commands?: {
+                    commands?: Record<string, unknown>;
+                    executeCommandById?: (id: string) => boolean;
+                };
+            }
+        ).commands;
+        const id = Object.keys(commands?.commands ?? {}).find((k) =>
+            k.startsWith("ai-transcriber:")
+        );
+        if (id && commands?.executeCommandById) {
+            commands.executeCommandById(id);
+        } else {
+            new Notice(t().agenda.notices.transcriberMissing);
+        }
+    }
+
+    private openMeetingLink(url: string): void {
+        if (url.startsWith("https://")) window.open(url, "_blank");
+    }
+
+    private async copyMeetingLink(url: string): Promise<void> {
+        try {
+            await navigator.clipboard.writeText(url);
+            new Notice(t().agenda.notices.linkCopied);
+        } catch (e) {
+            // Clipboard can be unavailable (permissions / non-secure context);
+            // fall back to opening the link rather than failing silently.
+            console.warn("[Meeting Copilot] clipboard write failed", e);
+            this.openMeetingLink(url);
+        }
+    }
+
+    private openPluginSettings(): void {
+        const setting = (
+            this.app as unknown as {
+                setting?: {
+                    open: () => void;
+                    openTabById: (id: string) => void;
+                };
+            }
+        ).setting;
+        if (setting) {
+            setting.open();
+            setting.openTabById(this.manifest.id);
+        }
+    }
+
     // MARK: - Status handling
 
     private handleStatus(status: RecorderStatus) {
-        if (status.status === "stopped" && status.file) {
-            this.clearDurationTimer();
-            this.updateRibbonIcon(false);
-            this.hideStatusBar();
+        if (status.status === "stopped") {
+            if (status.file) {
+                this.clearDurationTimer();
+                this.updateRibbonIcon(false);
+                this.hideStatusBar();
 
-            const fileName = path.basename(status.file);
-            // Meeting recordings are linked into their own note; ad-hoc ones go
-            // to the active note as before.
-            void this.attachRecording(fileName);
-            new Notice(t().notices.recordingSaved);
+                const fileName = path.basename(status.file);
+                // Meeting recordings are linked into their own note; ad-hoc ones
+                // go to the active note as before.
+                void this.attachRecording(fileName);
+                new Notice(t().notices.recordingSaved);
+            } else {
+                // Stopped without a reported file (e.g. a clean helper exit with
+                // no terminal payload); reset so the UI doesn't stay stuck.
+                this.resetRecordingUi();
+            }
         } else if (status.status === "error") {
-            this.clearDurationTimer();
-            this.updateRibbonIcon(false);
-            this.hideStatusBar();
+            this.resetRecordingUi();
             new Notice(
                 t().notices.recordingError(status.message ?? t().notices.unknownError)
             );
@@ -409,6 +631,16 @@ export default class SystemRecordingPlugin extends Plugin {
         }
     }
 
+    /** Returns all recording UI/state to idle after a stop or failure. */
+    private resetRecordingUi() {
+        this.clearDurationTimer();
+        this.updateRibbonIcon(false);
+        this.hideStatusBar();
+        this.currentMeetingNotePath = null;
+        this.currentRecordingEventId = null;
+        this.agendaEvents.emit("changed", undefined);
+    }
+
     private hideStatusBar() {
         if (this.statusBarEl) {
             this.statusBarEl.addClass("system-recording-hidden");
@@ -429,10 +661,28 @@ export default class SystemRecordingPlugin extends Plugin {
     private async attachRecording(fileName: string) {
         const notePath = this.currentMeetingNotePath;
         this.currentMeetingNotePath = null;
+        this.currentRecordingEventId = null;
+        this.agendaEvents.emit("changed", undefined);
         if (notePath) {
             const file = this.app.vault.getAbstractFileByPath(notePath);
             if (file instanceof TFile) {
-                await linkRecording(this.app, file, fileName);
+                // Qualify the link with the recording's folder (it's colocated
+                // with the note) so duplicate basenames elsewhere can't resolve
+                // to the wrong file.
+                const slash = notePath.lastIndexOf("/");
+                const folder = slash >= 0 ? notePath.slice(0, slash) : "";
+                const link = folder ? `${folder}/${fileName}` : fileName;
+                try {
+                    await linkRecording(this.app, file, link);
+                } catch (e) {
+                    new Notice(
+                        t().notices.recordingError(
+                            e instanceof Error ? e.message : String(e)
+                        )
+                    );
+                } finally {
+                    this.agendaEvents.emit("changed", undefined);
+                }
                 return;
             }
         }
