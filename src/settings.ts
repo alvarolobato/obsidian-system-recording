@@ -8,7 +8,9 @@ import {
 import { DEFAULT_ENRICH_PROMPT } from "./enrich/prompt";
 import { listModels } from "./enrich/models";
 import { inferSttApiType, STT_MODELS, type SttApiType } from "./transcribe/sttModel";
-import { t } from "./i18n";
+import { probeKey, probeTimestampSupport } from "./transcribe/probe";
+import { listModels as listSttModels } from "./transcribe/models";
+import { t, type Messages } from "./i18n";
 
 export interface SystemRecordingSettings {
 	recordingFolder: string;
@@ -48,6 +50,12 @@ export interface SystemRecordingSettings {
 	dictionaryCorrectionEnabled: boolean;
 	/** Custom dictionary, one `misheard => correct` rule per line (English). */
 	dictionary: string;
+	/** Transcribe mic and system audio separately so each speaker's side can be told apart. Needs a timestamp-capable model. */
+	diarizationEnabled: boolean;
+	/** Whether the configured endpoint actually returns segment timestamps. null = never probed, or invalidated by a later config change. */
+	sttTimestampsSupported: boolean | null;
+	/** The `${apiBaseUrl}::${sttModel}` the flag above was probed against; a mismatch means it's stale. */
+	sttTimestampsProbeKey: string;
 	// Enrichment.
 	enableEnrichment: boolean;
 	enrichModel: string;
@@ -92,6 +100,9 @@ export const DEFAULT_SETTINGS: SystemRecordingSettings = {
 	postProcessingEnabled: false,
 	dictionaryCorrectionEnabled: false,
 	dictionary: "",
+	diarizationEnabled: false,
+	sttTimestampsSupported: null,
+	sttTimestampsProbeKey: "",
 	enableEnrichment: true,
 	enrichModel: "gpt-4o",
 	enrichPrompt: DEFAULT_ENRICH_PROMPT,
@@ -329,6 +340,7 @@ export class SystemRecordingSettingTab extends PluginSettingTab {
 					.setValue(this.plugin.settings.apiBaseUrl)
 					.onChange(async (value) => {
 						this.plugin.settings.apiBaseUrl = value.trim();
+						this.resetTimestampProbe();
 						await this.plugin.saveSettings();
 					})
 			);
