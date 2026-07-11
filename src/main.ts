@@ -33,7 +33,12 @@ import {
     withEnrichedBlock,
 } from "./notes/enrichedBlock";
 import { extractActionItems, mergeActionItems } from "./notes/actionItems";
-import { buildDashboardBlock, withDashboardBlock } from "./notes/dashboard";
+import {
+    ATTENTION_BLOCK_LANG,
+    buildDashboardBlock,
+    withDashboardBlock,
+} from "./notes/dashboard";
+import { computeAttention, type AttentionInput } from "./notes/attention";
 import { findExpiredRecordings } from "./recordings/retention";
 
 /** Note section that holds action-item checkboxes (obsidian-tasks compatible). */
@@ -149,6 +154,13 @@ export default class SystemRecordingPlugin extends Plugin {
                     this.addNoteMeetingMenu(menu, file);
                 }
             })
+        );
+
+        // "Needs attention" dashboard section: meetings that haven't finished
+        // the pipeline, rendered with per-row action buttons.
+        this.registerMarkdownCodeBlockProcessor(
+            ATTENTION_BLOCK_LANG,
+            (_src, el) => this.renderAttention(el)
         );
 
         // Status bar
@@ -645,6 +657,129 @@ export default class SystemRecordingPlugin extends Plugin {
             this.noteRowHandlers(),
             { includeNavigation: false }
         );
+    }
+
+    /**
+     * Renders the dashboard's "Needs attention" table: meeting notes that
+     * haven't finished the scheduled → recorded → transcribed → enriched
+     * pipeline, each with buttons to open, transcribe, and enrich.
+     */
+    private renderAttention(el: HTMLElement): void {
+        el.empty();
+        const d = t().dashboard.attention;
+        const acts = t().agenda.actions;
+
+        const folder =
+            this.settings.meetingsFolder.trim().replace(/\/+$/, "") ||
+            "Meetings";
+        const prefix = `${folder}/`;
+        const byPath = new Map<string, TFile>();
+        const inputs: AttentionInput[] = [];
+        for (const f of this.app.vault.getMarkdownFiles()) {
+            if (f.path !== `${folder}.md` && !f.path.startsWith(prefix))
+                continue;
+            const fm = this.app.metadataCache.getFileCache(f)?.frontmatter as
+                | Record<string, unknown>
+                | undefined;
+            if (!fm) continue;
+            if (!(fm["event_id"] || fm["meeting_url"] || fm["recording"]))
+                continue;
+            const startRaw = fm["start"] ?? fm["date"];
+            const start =
+                typeof startRaw === "string" ? new Date(startRaw) : null;
+            const status =
+                typeof fm["status"] === "string" ? fm["status"] : null;
+            const titleRaw = fm["title"];
+            const title =
+                typeof titleRaw === "string" && titleRaw
+                    ? titleRaw
+                    : f.basename;
+            byPath.set(f.path, f);
+            inputs.push({
+                path: f.path,
+                title,
+                start,
+                status,
+                hasRecording: recordingLinkTarget(fm["recording"]) !== "",
+            });
+        }
+
+        const rows = computeAttention(inputs, new Date());
+
+        const header = el.createDiv({ cls: "mc-attention-header" });
+        header.createSpan({ text: d.count(rows.length) });
+        const refresh = header.createEl("button", { text: d.refresh });
+        refresh.onclick = () => this.renderAttention(el);
+
+        if (rows.length === 0) {
+            el.createEl("p", { text: d.allClear, cls: "mc-attention-empty" });
+            return;
+        }
+
+        const table = el.createEl("table", { cls: "mc-attention" });
+        const head = table.createEl("thead").createEl("tr");
+        for (const h of [
+            d.colMeeting,
+            d.colDate,
+            d.colStatus,
+            d.colMissing,
+            d.colActions,
+        ]) {
+            head.createEl("th", { text: h });
+        }
+        const body = table.createEl("tbody");
+        const pad = (n: number): string => String(n).padStart(2, "0");
+        const fmtDate = (dt: Date): string =>
+            `${dt.getFullYear()}-${pad(dt.getMonth() + 1)}-${pad(
+                dt.getDate()
+            )} ${pad(dt.getHours())}:${pad(dt.getMinutes())}`;
+
+        for (const row of rows) {
+            const file = byPath.get(row.path);
+            const tr = body.createEl("tr");
+
+            const nameTd = tr.createEl("td");
+            const link = nameTd.createEl("a", {
+                text: row.title,
+                cls: "internal-link",
+            });
+            link.onclick = (e): void => {
+                e.preventDefault();
+                if (file) this.openFileInTab(file);
+            };
+
+            tr.createEl("td", { text: row.start ? fmtDate(row.start) : "—" });
+            tr.createEl("td", { text: row.status });
+
+            const missTd = tr.createEl("td");
+            for (const m of row.missing) {
+                missTd.createSpan({
+                    text: d.missing[m],
+                    cls: `mc-badge mc-badge-${m}`,
+                });
+            }
+
+            const actTd = tr.createEl("td", { cls: "mc-attention-actions" });
+            if (!file) continue;
+            const meeting = this.agendaMeetingFromNote(file);
+            const openBtn = actTd.createEl("button", { text: acts.openNote });
+            openBtn.onclick = (): void => this.openFileInTab(file);
+            if (meeting.recording) {
+                const trBtn = actTd.createEl("button", {
+                    text: acts.transcribe,
+                });
+                trBtn.onclick = (): void => void this.transcribeRecording(
+                    meeting
+                );
+            }
+            const enBtn = actTd.createEl("button", { text: acts.enrich });
+            enBtn.onclick = (): void => void this.enrichMeetingNote(file);
+        }
+    }
+
+    /** Opens a file in the active tab (used by dashboard row links/buttons). */
+    private openFileInTab(file: TFile): void {
+        void this.app.workspace.getLeaf(false).openFile(file);
     }
 
     /** Builds an AgendaMeeting view-model from a meeting note's frontmatter. */

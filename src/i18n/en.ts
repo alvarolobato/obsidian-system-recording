@@ -118,6 +118,25 @@ export const en = {
 			noRecording: "No recording for this meeting yet",
 		},
 	},
+	dashboard: {
+		attention: {
+			allClear: "All meetings are complete. 🎉",
+			count: (n: number) =>
+				`${n} meeting${n === 1 ? "" : "s"} need attention`,
+			refresh: "Refresh",
+			colMeeting: "Meeting",
+			colDate: "Date",
+			colStatus: "Status",
+			colMissing: "Missing",
+			colActions: "Actions",
+			missing: {
+				date: "date",
+				recording: "recording",
+				transcript: "transcript",
+				summary: "summary",
+			},
+		},
+	},
 	settings: {
 		recordingFolder: {
 			name: "Recording folder",

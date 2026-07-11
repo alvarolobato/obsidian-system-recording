@@ -62,6 +62,75 @@
 }
 
 /* =========================================================================
+ * "Needs attention" dashboard section (rendered by the plugin).
+ * ====================================================================== */
+.mc-attention-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--size-4-2);
+    margin-bottom: var(--size-4-2);
+}
+
+.mc-attention-empty {
+    color: var(--text-muted);
+}
+
+table.mc-attention {
+    width: 100%;
+    border-collapse: collapse;
+}
+
+table.mc-attention th,
+table.mc-attention td {
+    text-align: left;
+    padding: var(--size-2-2) var(--size-4-2);
+    border-bottom: 1px solid var(--background-modifier-border);
+    vertical-align: middle;
+}
+
+.mc-attention-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--size-2-2);
+}
+
+.mc-attention-actions button {
+    font-size: var(--font-ui-smaller);
+    padding: var(--size-2-1) var(--size-2-3);
+}
+
+.mc-badge {
+    display: inline-block;
+    margin-inline-end: var(--size-2-1);
+    padding: 0 var(--size-2-2);
+    border-radius: var(--radius-s);
+    font-size: var(--font-ui-smaller);
+    background: var(--background-modifier-border);
+    color: var(--text-muted);
+}
+
+.mc-badge-date {
+    background: var(--background-modifier-error);
+    color: var(--text-on-accent);
+}
+
+.mc-badge-recording {
+    background: rgba(var(--color-red-rgb), 0.2);
+    color: var(--text-normal);
+}
+
+.mc-badge-transcript {
+    background: rgba(var(--color-yellow-rgb), 0.2);
+    color: var(--text-normal);
+}
+
+.mc-badge-summary {
+    background: rgba(var(--color-blue-rgb), 0.2);
+    color: var(--text-normal);
+}
+
+/* =========================================================================
  * Meeting agenda sidebar view.
  * Portions adapted from obsidian-meetings-plus (0BSD):
  * https://github.com/jabaho9523/obsidian-meetings-plus — see THIRD_PARTY_NOTICES.md.

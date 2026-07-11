@@ -2,6 +2,9 @@
 export const DASHBOARD_START = "%% meeting-copilot:dashboard %%";
 export const DASHBOARD_END = "%% /meeting-copilot:dashboard %%";
 
+/** Fenced code-block language rendered by the plugin's "Needs attention" processor. */
+export const ATTENTION_BLOCK_LANG = "meeting-copilot-attention";
+
 /** Escapes a string for safe use as a Dataview `FROM "…"` source. */
 function sourceFolder(meetingsFolder: string): string {
 	return meetingsFolder.replace(/"/g, "").replace(/\/+$/, "") || "Meetings";
@@ -43,6 +46,12 @@ export function buildDashboardBlock(meetingsFolder: string): string {
 		`FROM "${folder}"`,
 		"WHERE !completed",
 		"GROUP BY file.link",
+		"```",
+		"",
+		"## Needs attention",
+		// Rendered by the plugin: meetings that haven't finished the
+		// scheduled → recorded → transcribed → enriched pipeline, with buttons.
+		"```" + ATTENTION_BLOCK_LANG,
 		"```",
 		DASHBOARD_END,
 	].join("\n");

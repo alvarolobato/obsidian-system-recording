@@ -582,7 +582,7 @@ export class SystemRecordingSettingTab extends PluginSettingTab {
 						await this.plugin.saveSettings();
 					}
 				);
-				ta.inputEl.rows = 12;
+				ta.inputEl.rows = 18;
 				ta.inputEl.addClass("meeting-copilot-template-input");
 			});
 
