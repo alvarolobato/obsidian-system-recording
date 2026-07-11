@@ -482,10 +482,11 @@ function rememberRecentNote(eventId: string, path: string): void {
 	// Re-insert so the entry moves to the back of the eviction order.
 	recentNoteByEventId.delete(eventId);
 	recentNoteByEventId.set(eventId, path);
-	while (recentNoteByEventId.size > RECENT_NOTE_CACHE_MAX) {
-		const oldest = recentNoteByEventId.keys().next().value;
-		if (oldest === undefined) break;
-		recentNoteByEventId.delete(oldest);
+	if (recentNoteByEventId.size > RECENT_NOTE_CACHE_MAX) {
+		for (const oldest of recentNoteByEventId.keys()) {
+			recentNoteByEventId.delete(oldest);
+			if (recentNoteByEventId.size <= RECENT_NOTE_CACHE_MAX) break;
+		}
 	}
 }
 
