@@ -148,6 +148,11 @@ table.mc-attention td {
 	display: flex;
 	flex-direction: column;
 	gap: 8px;
+	position: sticky;
+	top: 0;
+	z-index: 2;
+	background: var(--background-primary);
+	padding-bottom: 8px;
 }
 
 .meeting-copilot-status-top {

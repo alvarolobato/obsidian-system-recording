@@ -54,7 +54,8 @@ export class MeetingAgendaView extends ItemView {
 	private skipped = new Set<string>();
 	private unsub: (() => void) | null = null;
 	private tickTimer: number | null = null;
-	private pendingScrollKey: string | null = null;
+	/** After a day-navigation re-render, scroll the list back to the top so the header stays in view. */
+	private scrollToTopOnRender = false;
 	private reloadSeq = 0;
 
 	constructor(leaf: WorkspaceLeaf, private host: AgendaViewHost) {
@@ -257,14 +258,14 @@ export class MeetingAgendaView extends ItemView {
 			});
 		}
 
-		if (this.pendingScrollKey) {
-			const target = this.pendingScrollKey;
-			this.pendingScrollKey = null;
+		if (this.scrollToTopOnRender) {
+			this.scrollToTopOnRender = false;
+			// Reset the list to the top so the header (and its Prev/Next buttons)
+			// stays visible. Previously we scrolled the focused day into view with
+			// `block: "start"`, which pushed the header off-screen — forcing a
+			// scroll back up before Next could be clicked again.
 			window.requestAnimationFrame(() => {
-				const el = this.contentEl.querySelector(`[data-day="${target}"]`);
-				if (el instanceof HTMLElement) {
-					el.scrollIntoView({ behavior: "smooth", block: "start" });
-				}
+				this.contentEl.scrollTop = 0;
 			});
 		}
 	}
@@ -414,7 +415,7 @@ export class MeetingAgendaView extends ItemView {
 
 	private jumpToDay(k: string): void {
 		this.focusedDay = k;
-		this.pendingScrollKey = k;
+		this.scrollToTopOnRender = true;
 		void this.reload();
 	}
 
