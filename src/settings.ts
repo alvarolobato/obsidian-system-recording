@@ -43,7 +43,6 @@ export interface SystemRecordingSettings {
 	/** Engine family the model speaks — drives routing/chunking and word timestamps. */
 	sttApiType: SttApiType;
 	sttLanguage: string;
-	vadMode: "server" | "disabled";
 	postProcessingEnabled: boolean;
 	dictionaryCorrectionEnabled: boolean;
 	/** Custom dictionary, one `misheard => correct` rule per line (English). */
@@ -88,7 +87,6 @@ export const DEFAULT_SETTINGS: SystemRecordingSettings = {
 	sttModel: "gpt-4o-transcribe",
 	sttApiType: "gpt-4o-transcribe",
 	sttLanguage: "auto",
-	vadMode: "server",
 	postProcessingEnabled: false,
 	dictionaryCorrectionEnabled: false,
 	dictionary: "",
@@ -440,21 +438,6 @@ export class SystemRecordingSettingTab extends PluginSettingTab {
 					.onChange(async (value) => {
 						this.plugin.settings.sttLanguage =
 							value.trim() || "auto";
-						await this.plugin.saveSettings();
-					})
-			);
-
-		new Setting(containerEl)
-			.setName(s.settings.vadMode.name)
-			.setDesc(s.settings.vadMode.desc)
-			.addDropdown((dd) =>
-				dd
-					.addOption("server", s.settings.vadMode.server)
-					.addOption("disabled", s.settings.vadMode.disabled)
-					.setValue(this.plugin.settings.vadMode)
-					.onChange(async (value) => {
-						this.plugin.settings.vadMode =
-							value === "disabled" ? "disabled" : "server";
 						await this.plugin.saveSettings();
 					})
 			);

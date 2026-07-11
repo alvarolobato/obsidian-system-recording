@@ -342,14 +342,6 @@ export default class SystemRecordingPlugin extends Plugin {
         // Guard against corrupt/hand-edited data selecting an unknown engine
         // family, which would silently fall through to the GPT-4o path.
         this.settings.sttApiType = clampApiType(this.settings.sttApiType);
-        // We ship no local-VAD WASM, so only server/disabled are valid; keep
-        // hand-edited data from sending the engine down the local VAD path.
-        if (
-            this.settings.vadMode !== "server" &&
-            this.settings.vadMode !== "disabled"
-        ) {
-            this.settings.vadMode = DEFAULT_SETTINGS.vadMode;
-        }
     }
 
     async saveSettings() {
@@ -1154,7 +1146,6 @@ export default class SystemRecordingPlugin extends Plugin {
             modelOverride: s.sttModel,
             chatModel: s.enrichModel,
             language: s.sttLanguage || "auto",
-            vadMode: s.vadMode,
             postProcessingEnabled: s.postProcessingEnabled,
             dictionaryCorrectionEnabled: s.dictionaryCorrectionEnabled,
             userDictionaries: parseDictionary(s.dictionary),

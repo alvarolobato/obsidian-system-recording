@@ -493,48 +493,61 @@ export class TranscriptionController {
 			const currentLanguage = this.settings.language;
 
 		if (currentLanguage === 'auto') {
-			// For auto-detect, use all language dictionaries combined
-			const allEntries = this.convertAllDictionariesToEntries();
+			// parseDictionary populates all language buckets with the same rules,
+			// so reading one bucket is sufficient — reading all four would triple/
+			// quadruple every rule in the correction prompt and rule list.
+			const canonical = this.settings.userDictionaries.en;
+			const allEntries = this.convertDictionaryToEntries(canonical);
 
 			if (allEntries.length > 0) {
 				const multiDict = {
 					name: 'user-dictionary-multi',
-					language: 'multi', // Special language code for multi-language
+					language: 'multi',
 					enabled: true,
 					useGPTCorrection: useGPTCorrection,
-					// Pass all dictionaries data for GPT correction
-					definiteCorrections: [
-						...this.settings.userDictionaries.ja.definiteCorrections,
-						...this.settings.userDictionaries.en.definiteCorrections,
-						...this.settings.userDictionaries.zh.definiteCorrections
-					],
-						contextualCorrections: [
-							...(this.settings.userDictionaries.ja.contextualCorrections ?? []),
-							...(this.settings.userDictionaries.en.contextualCorrections ?? []),
-							...(this.settings.userDictionaries.zh.contextualCorrections ?? [])
-						],
-						entries: allEntries
-					};
+					definiteCorrections: canonical.definiteCorrections,
+					contextualCorrections: canonical.contextualCorrections ?? [],
+					entries: allEntries
+				};
 				corrector.addDictionary(multiDict);
 			}
-		} else if (currentLanguage === 'ja' || currentLanguage === 'en' || currentLanguage === 'zh') {
-			// For specific language, use only that language's dictionary
-				const userDictionary = this.settings.userDictionaries[currentLanguage];
-				const entries = this.convertDictionaryToEntries(userDictionary);
+		} else if (currentLanguage === 'ja' || currentLanguage === 'en' || currentLanguage === 'zh' || currentLanguage === 'ko') {
+			// For a known language, use that language's bucket.
+			const userDictionary = this.settings.userDictionaries[currentLanguage as 'ja' | 'en' | 'zh' | 'ko'];
+			const entries = this.convertDictionaryToEntries(userDictionary);
 
-				if (entries.length > 0) {
-					const langDict = {
-						name: `user-dictionary-${currentLanguage}`,
-						language: currentLanguage,
-						enabled: true,
-						useGPTCorrection: useGPTCorrection,
-						definiteCorrections: userDictionary.definiteCorrections,
-						contextualCorrections: userDictionary.contextualCorrections ?? [],
-						entries: entries
-					};
-					corrector.addDictionary(langDict);
-				}
+			if (entries.length > 0) {
+				const langDict = {
+					name: `user-dictionary-${currentLanguage}`,
+					language: currentLanguage,
+					enabled: true,
+					useGPTCorrection: useGPTCorrection,
+					definiteCorrections: userDictionary.definiteCorrections,
+					contextualCorrections: userDictionary.contextualCorrections ?? [],
+					entries: entries
+				};
+				corrector.addDictionary(langDict);
 			}
+		} else {
+			// Unknown language (e.g. 'es', 'de', 'fr'): fall back to the 'en' bucket,
+			// which holds all of the user's rules since parseDictionary mirrors them
+			// across every bucket.
+			const userDictionary = this.settings.userDictionaries.en;
+			const entries = this.convertDictionaryToEntries(userDictionary);
+
+			if (entries.length > 0) {
+				const langDict = {
+					name: 'user-dictionary-fallback',
+					language: 'multi',
+					enabled: true,
+					useGPTCorrection: useGPTCorrection,
+					definiteCorrections: userDictionary.definiteCorrections,
+					contextualCorrections: userDictionary.contextualCorrections ?? [],
+					entries: entries
+				};
+				corrector.addDictionary(langDict);
+			}
+		}
 
 		return corrector;
 	}

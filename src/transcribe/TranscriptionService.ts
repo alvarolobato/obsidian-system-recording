@@ -5,7 +5,6 @@ import {
 	type APITranscriptionSettings,
 	type LanguageDictionaries,
 	type TranscriptionModel,
-	type VADMode,
 } from "./vendor/ApiSettings";
 import {
 	setChatModelOverride,
@@ -22,6 +21,7 @@ import en from "./vendor/i18n/translations/en";
 import ja from "./vendor/i18n/translations/ja";
 import ko from "./vendor/i18n/translations/ko";
 import zh from "./vendor/i18n/translations/zh";
+
 
 let engineInitialized = false;
 
@@ -49,8 +49,6 @@ export interface TranscribeConfig {
 	/** Chat model for GPT-assisted dictionary correction; "" uses the engine default. */
 	chatModel: string;
 	language: string;
-	/** Only "server" | "disabled" are wired; local VAD needs a WASM asset we don't ship. */
-	vadMode: VADMode;
 	postProcessingEnabled: boolean;
 	dictionaryCorrectionEnabled: boolean;
 	userDictionaries: LanguageDictionaries;
@@ -78,7 +76,7 @@ async function runTranscription(
 		openaiApiKey: cfg.apiKey ? `PLAIN::${cfg.apiKey}` : "",
 		model: cfg.model,
 		language: cfg.language,
-		vadMode: cfg.vadMode,
+		vadMode: "server",
 		postProcessingEnabled: cfg.postProcessingEnabled,
 		dictionaryCorrectionEnabled: cfg.dictionaryCorrectionEnabled,
 		userDictionaries: cfg.userDictionaries,

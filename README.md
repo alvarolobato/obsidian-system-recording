@@ -7,7 +7,7 @@ A Granola-style meeting workflow for Obsidian on macOS. Meeting Copilot reads yo
 - macOS 13.0+ (Apple Silicon)
 - Obsidian Desktop
 - A Google account (for calendar integration)
-- An OpenAI-compatible LLM endpoint (OpenAI, Azure OpenAI, a LiteLLM proxy, Ollama, …) for transcription and enrichment
+- An OpenAI-compatible endpoint for enrichment (OpenAI, Azure OpenAI via the OpenAI-compatible surface, a LiteLLM proxy, …), and an endpoint that serves `/audio/transcriptions` for transcription (OpenAI, Whisper-via-LiteLLM, …). **Ollama does not expose `/audio/transcriptions`**, so it can only be used for enrichment, not transcription. **Azure** requires the newer `/openai/v1` OpenAI-compatible surface — the classic deployment-path format won't match.
 
 ## Features
 
@@ -31,7 +31,7 @@ Meeting Copilot handles calendar, recording, transcription, and enrichment on it
 | [Dataview](https://github.com/blacksmithgu/obsidian-dataview) | The Meetings dashboard command | Optional |
 | [Tasks](https://github.com/obsidian-tasks-group/obsidian-tasks) | Tracking the `## Action items` checkboxes | Optional (checkboxes work without it) |
 
-> Transcription and enrichment share one OpenAI-compatible endpoint (OpenAI, Azure, a LiteLLM proxy, …), configured in Meeting Copilot's own settings. The transcription engine is bundled (vendored from [AI Transcriber](https://github.com/mssoftjp/obsidian-ai-transcriber), MIT); AI Transcriber does **not** need to be installed.
+> Transcription and enrichment share one endpoint configured in Meeting Copilot's own settings. The endpoint must be OpenAI-compatible and serve both `/audio/transcriptions` (for transcription) and `/chat/completions` (for enrichment). OpenAI and a LiteLLM proxy work for both. Ollama works for enrichment only (no `/audio/transcriptions`). Azure works only via the newer OpenAI-compatible surface (`/openai/v1`), not the classic deployment-path format. The transcription engine itself is bundled (vendored from [AI Transcriber](https://github.com/mssoftjp/obsidian-ai-transcriber), MIT); AI Transcriber does **not** need to be installed.
 
 ## Installation
 
