@@ -6,7 +6,6 @@ import {
 	oneOnOnePartnerEmail,
 } from "./googleCalendar";
 
-
 describe("isDeclinedByUser", () => {
 	it("is true only when the self attendee declined", () => {
 		expect(
@@ -86,6 +85,8 @@ describe("collectPages", () => {
 		const all = await collectPages<number>(fetchPage);
 		expect(all).toEqual([1]);
 		expect(fetchPage).toHaveBeenCalledTimes(1);
+	});
+});
 
 describe("oneOnOnePartner", () => {
 	it("returns the other attendee when exactly two humans, one of them self", () => {
