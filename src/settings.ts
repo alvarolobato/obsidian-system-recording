@@ -1,5 +1,5 @@
 import { App, Notice, PluginSettingTab, Setting } from "obsidian";
-import SystemRecordingPlugin from "./main";
+import type SystemRecordingPlugin from "./main";
 import type { StoredTokens } from "./auth/googleOAuth";
 import {
 	DEFAULT_NOTE_TEMPLATE,
@@ -13,7 +13,16 @@ import { t } from "./i18n";
 export interface SystemRecordingSettings {
 	recordingFolder: string;
 	fileNameTemplate: string;
-	meetingsFolder: string;
+	/** `{{placeholder}}` folder template for one-off meetings, e.g. "Meetings/{{year}}". */
+	oneOffFolderTemplate: string;
+	/** `{{placeholder}}` folder template for a new recurring series, e.g. "Meetings/{{series}}". */
+	seriesFolderTemplate: string;
+	/** When on, 1:1s get their own per-person folder instead of following the series/one-off rules. */
+	oneOnOneSeparately: boolean;
+	/** Parent folder for a 1:1's per-person subfolder. */
+	oneOnOneFolder: string;
+	/** Folder for unplanned (ad-hoc) meetings. */
+	adhocFolder: string;
 	noteTitlePattern: string;
 	noteTemplate: string;
 	retentionDays: number;
@@ -62,7 +71,11 @@ export { STT_MODELS, inferSttApiType, type SttApiType };
 export const DEFAULT_SETTINGS: SystemRecordingSettings = {
 	recordingFolder: "recordings",
 	fileNameTemplate: "recording-YYYY-MM-DD-HHmmss",
-	meetingsFolder: "Meetings",
+	oneOffFolderTemplate: "Meetings/{{year}}",
+	seriesFolderTemplate: "Meetings/{{series}}",
+	oneOnOneSeparately: false,
+	oneOnOneFolder: "Meetings/1-1s",
+	adhocFolder: "Meetings/Ad-hoc",
 	noteTitlePattern: DEFAULT_TITLE_PATTERN,
 	noteTemplate: DEFAULT_NOTE_TEMPLATE,
 	retentionDays: 90,
@@ -97,6 +110,30 @@ export const DEFAULT_SETTINGS: SystemRecordingSettings = {
 	hideAiNotes: false,
 	suggestAdhocTitle: true,
 };
+
+/**
+ * Migrates settings loaded from disk. A vault that predates the folder
+ * templates had a single `meetingsFolder` string; that string becomes the
+ * root for both the one-off and (new) series templates so an existing note
+ * layout doesn't move. Pure so it can run without a vault. `loaded` is
+ * untyped since the legacy `meetingsFolder` key no longer exists on
+ * `SystemRecordingSettings`.
+ */
+export function migrateSettings(
+	loaded: Record<string, unknown> | null
+): Partial<SystemRecordingSettings> {
+	if (!loaded) return {};
+	if (loaded["oneOffFolderTemplate"] !== undefined) {
+		return loaded as Partial<SystemRecordingSettings>;
+	}
+	const legacyFolder = loaded["meetingsFolder"];
+	const base = typeof legacyFolder === "string" && legacyFolder ? legacyFolder : "Meetings";
+	return {
+		...(loaded as Partial<SystemRecordingSettings>),
+		oneOffFolderTemplate: base,
+		seriesFolderTemplate: `${base}/{{series}}`,
+	};
+}
 
 export class SystemRecordingSettingTab extends PluginSettingTab {
     plugin: SystemRecordingPlugin;
@@ -613,15 +650,69 @@ export class SystemRecordingSettingTab extends PluginSettingTab {
 			);
 
 		new Setting(containerEl)
-			.setName(s.settings.meetingsFolder.name)
-			.setDesc(s.settings.meetingsFolder.desc)
+			.setName(s.settings.oneOffFolderTemplate.name)
+			.setDesc(s.settings.oneOffFolderTemplate.desc)
 			.addText((text) =>
 				text
-					.setPlaceholder(s.settings.meetingsFolder.placeholder)
-					.setValue(this.plugin.settings.meetingsFolder)
+					.setPlaceholder(DEFAULT_SETTINGS.oneOffFolderTemplate)
+					.setValue(this.plugin.settings.oneOffFolderTemplate)
 					.onChange(async (value) => {
-						this.plugin.settings.meetingsFolder =
-							value.trim() || "Meetings";
+						this.plugin.settings.oneOffFolderTemplate =
+							value.trim() || DEFAULT_SETTINGS.oneOffFolderTemplate;
+						await this.plugin.saveSettings();
+					})
+			);
+
+		new Setting(containerEl)
+			.setName(s.settings.seriesFolderTemplate.name)
+			.setDesc(s.settings.seriesFolderTemplate.desc)
+			.addText((text) =>
+				text
+					.setPlaceholder(DEFAULT_SETTINGS.seriesFolderTemplate)
+					.setValue(this.plugin.settings.seriesFolderTemplate)
+					.onChange(async (value) => {
+						this.plugin.settings.seriesFolderTemplate =
+							value.trim() || DEFAULT_SETTINGS.seriesFolderTemplate;
+						await this.plugin.saveSettings();
+					})
+			);
+
+		new Setting(containerEl)
+			.setName(s.settings.adhocFolder.name)
+			.setDesc(s.settings.adhocFolder.desc)
+			.addText((text) =>
+				text
+					.setPlaceholder(DEFAULT_SETTINGS.adhocFolder)
+					.setValue(this.plugin.settings.adhocFolder)
+					.onChange(async (value) => {
+						this.plugin.settings.adhocFolder =
+							value.trim() || DEFAULT_SETTINGS.adhocFolder;
+						await this.plugin.saveSettings();
+					})
+			);
+
+		new Setting(containerEl)
+			.setName(s.settings.oneOnOneSeparately.name)
+			.setDesc(s.settings.oneOnOneSeparately.desc)
+			.addToggle((toggle) =>
+				toggle
+					.setValue(this.plugin.settings.oneOnOneSeparately)
+					.onChange(async (value) => {
+						this.plugin.settings.oneOnOneSeparately = value;
+						await this.plugin.saveSettings();
+					})
+			);
+
+		new Setting(containerEl)
+			.setName(s.settings.oneOnOneFolder.name)
+			.setDesc(s.settings.oneOnOneFolder.desc)
+			.addText((text) =>
+				text
+					.setPlaceholder(DEFAULT_SETTINGS.oneOnOneFolder)
+					.setValue(this.plugin.settings.oneOnOneFolder)
+					.onChange(async (value) => {
+						this.plugin.settings.oneOnOneFolder =
+							value.trim() || DEFAULT_SETTINGS.oneOnOneFolder;
 						await this.plugin.saveSettings();
 					})
 			);

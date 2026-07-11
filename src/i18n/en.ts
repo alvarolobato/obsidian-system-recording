@@ -171,10 +171,25 @@ export const en = {
 			name: "File name template",
 			desc: "File name format. Tokens `YYYY MM DD HH mm ss` are replaced with the date and time.",
 		},
-		meetingsFolder: {
-			name: "Meetings folder",
-			desc: "Folder for meeting notes and their recordings. Recurring meetings get their own subfolder.",
-			placeholder: "Meetings",
+		oneOffFolderTemplate: {
+			name: "One-off meetings folder",
+			desc: "Folder template for a one-off meeting's note and recording. Tokens: {{year}}, {{month}}, {{title}}, {{date}}.",
+		},
+		seriesFolderTemplate: {
+			name: "New series folder",
+			desc: "Folder template used the first time a recurring meeting is seen. Later occurrences follow wherever that folder ends up. Tokens: {{year}}, {{month}}, {{series}}, {{title}}, {{date}}.",
+		},
+		oneOnOneSeparately: {
+			name: "Handle 1:1s separately",
+			desc: "Give each 1:1 (a meeting with exactly one other attendee) its own folder under 'One-on-one folder' instead of the series/one-off rules above.",
+		},
+		oneOnOneFolder: {
+			name: "One-on-one folder",
+			desc: "Parent folder for per-person 1:1 subfolders, used when 'Handle 1:1s separately' is on.",
+		},
+		adhocFolder: {
+			name: "Ad-hoc meetings folder",
+			desc: "Folder for notes from unplanned (ad-hoc or detected) meetings.",
 		},
 		noteTitlePattern: {
 			name: "Note title pattern",

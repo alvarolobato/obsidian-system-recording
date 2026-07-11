@@ -15,6 +15,7 @@ function ev(overrides: Partial<MeetingEventInfo> = {}): MeetingEventInfo {
 		organizer: "Alice",
 		iCalUID: "uid-123",
 		recurringEventId: null,
+		oneOnOnePartner: null,
 		...overrides,
 	};
 }
@@ -46,5 +47,11 @@ describe("renderTemplate", () => {
 
 	it("leaves unknown placeholders empty", () => {
 		expect(renderTemplate("x{{nope}}y", ev())).toBe("xy");
+	});
+
+	it("renders the folder-template tokens", () => {
+		expect(renderTemplate("{{year}}", ev())).toBe("2026");
+		expect(renderTemplate("{{month}}", ev())).toBe("07");
+		expect(renderTemplate("{{series}}", ev())).toBe("Team Sync");
 	});
 });

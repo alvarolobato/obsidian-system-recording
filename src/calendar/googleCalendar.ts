@@ -20,6 +20,8 @@ export interface GCalEvent {
 	iCalUID: string | null;
 	/** Present only on instances of a recurring series; points at the master event. */
 	recurringEventId: string | null;
+	/** The other attendee's display name (or email) for a 1:1; null for anything else. */
+	oneOnOnePartner: string | null;
 }
 
 export interface GCalCalendar {
@@ -100,6 +102,21 @@ function mapAttendees(raw: RawAttendee[] | undefined): string[] {
 		.filter((a) => !a.resource)
 		.map((a) => (a.displayName || a.email || "").trim())
 		.filter((name) => name.length > 0);
+}
+
+/**
+ * The other participant's display name (or email) for a 1:1: exactly two
+ * non-resource attendees with exactly one of them marked `self`. Null for
+ * group meetings, a missing self flag, or an unnamed/emailless partner.
+ */
+export function oneOnOnePartner(raw: RawAttendee[] | undefined): string | null {
+	const humans = (raw ?? []).filter((a) => !a.resource);
+	if (humans.length !== 2) return null;
+	const selves = humans.filter((a) => a.self === true);
+	if (selves.length !== 1) return null;
+	const other = humans.find((a) => a.self !== true);
+	const name = (other?.displayName || other?.email || "").trim();
+	return name.length > 0 ? name : null;
 }
 
 async function authedGet(oauth: GoogleOAuth, url: string): Promise<unknown> {
@@ -190,6 +207,7 @@ export async function listEvents(
 			organizer,
 			iCalUID: ev.iCalUID ?? null,
 			recurringEventId: ev.recurringEventId ?? null,
+			oneOnOnePartner: oneOnOnePartner(ev.attendees),
 		};
 	});
 }

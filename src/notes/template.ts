@@ -11,7 +11,8 @@ const VAR_RE = /\{\{\s*([a-zA-Z_][a-zA-Z0-9_]*)(?::([^}]+))?\s*\}\}/g;
  * Renders a `{{placeholder}}` template against a meeting. Supported placeholders:
  * `title`, `date`, `start[:FMT]`, `end[:FMT]`, `duration`, `location`,
  * `meeting_url`, `organizer`, `attendees`, `attendees_list`,
- * `attendees_wikilinks`, `uid`, `event_id`, `event_link`.
+ * `attendees_wikilinks`, `uid`, `event_id`, `event_link`, `year`, `month`,
+ * `series` (the event summary; meant for folder templates, not note bodies).
  * Unknown placeholders render as an empty string.
  */
 export function renderTemplate(template: string, ev: MeetingEventInfo): string {
@@ -59,6 +60,12 @@ function resolveVariable(
 			return ev.id;
 		case "event_link":
 			return ev.htmlLink;
+		case "year":
+			return moment(ev.start).format("YYYY");
+		case "month":
+			return moment(ev.start).format("MM");
+		case "series":
+			return ev.summary;
 		default:
 			return "";
 	}

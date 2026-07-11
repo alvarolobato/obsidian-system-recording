@@ -2,6 +2,7 @@ import { FileSystemAdapter, MarkdownView, Menu, normalizePath, Notice, Platform,
 import {
     DEFAULT_SETTINGS,
     inferSttApiType,
+    migrateSettings,
     STT_MODELS,
     SttApiType,
     SystemRecordingSettings,
@@ -23,8 +24,10 @@ import {
     linkRecording,
     MeetingEventInfo,
     MeetingNoteConfig,
+    normalizeFolderPath,
     recordingLinkTarget,
     sanitizeName,
+    templateStaticRoot,
     upsertSection,
 } from "./notes/meetingNote";
 import {
@@ -304,7 +307,11 @@ export default class SystemRecordingPlugin extends Plugin {
                   sttModelId?: string;
               })
             | null;
-        this.settings = Object.assign({}, DEFAULT_SETTINGS, raw ?? {});
+        this.settings = Object.assign(
+            {},
+            DEFAULT_SETTINGS,
+            migrateSettings(raw as Record<string, unknown> | null)
+        );
         // Normalize the shared endpoint (tolerate hand-edited data.json).
         this.settings.apiBaseUrl = (this.settings.apiBaseUrl ?? "").trim();
         this.settings.apiKey = (this.settings.apiKey ?? "").trim();
@@ -495,6 +502,7 @@ export default class SystemRecordingPlugin extends Plugin {
             organizer: null,
             iCalUID: null,
             recurringEventId: null,
+            oneOnOnePartner: null,
         };
         try {
             const ref = await createMeetingNote(this.app, info, this.noteConfig());
@@ -847,6 +855,7 @@ export default class SystemRecordingPlugin extends Plugin {
 			organizer: e.organizer,
 			iCalUID: e.iCalUID,
 			recurringEventId: e.recurringEventId,
+			oneOnOnePartner: e.oneOnOnePartner,
 		}));
 	}
 
@@ -891,7 +900,11 @@ export default class SystemRecordingPlugin extends Plugin {
 
 	private noteConfig(): MeetingNoteConfig {
 		return {
-			baseFolder: this.settings.meetingsFolder,
+			oneOffFolderTemplate: this.settings.oneOffFolderTemplate,
+			seriesFolderTemplate: this.settings.seriesFolderTemplate,
+			oneOnOneSeparately: this.settings.oneOnOneSeparately,
+			oneOnOneFolder: this.settings.oneOnOneFolder,
+			adhocFolder: this.settings.adhocFolder,
 			titlePattern: this.settings.noteTitlePattern,
 			template: this.settings.noteTemplate,
 		};
@@ -910,6 +923,7 @@ export default class SystemRecordingPlugin extends Plugin {
 			organizer: e.organizer,
 			iCalUID: e.iCalUID,
 			recurringEventId: e.recurringEventId,
+			oneOnOnePartner: e.oneOnOnePartner,
 		};
 	}
 
@@ -1021,15 +1035,12 @@ export default class SystemRecordingPlugin extends Plugin {
         const d = t().dashboard.attention;
         const acts = t().agenda.actions;
 
-        const folder =
-            this.settings.meetingsFolder.trim().replace(/\/+$/, "") ||
-            "Meetings";
-        const prefix = `${folder}/`;
         const byPath = new Map<string, TFile>();
         const inputs: AttentionInput[] = [];
+        // Meeting notes can live in any of several folders now (per-series,
+        // per-1:1, ad-hoc, or wherever the user moved them), so identify them
+        // by frontmatter rather than a single configured folder.
         for (const f of this.app.vault.getMarkdownFiles()) {
-            if (f.path !== `${folder}.md` && !f.path.startsWith(prefix))
-                continue;
             const fm = this.app.metadataCache.getFileCache(f)?.frontmatter as
                 | Record<string, unknown>
                 | undefined;
@@ -1174,6 +1185,7 @@ export default class SystemRecordingPlugin extends Plugin {
             organizer: str("organizer") || null,
             iCalUID: str("ical_uid") || null,
             recurringEventId: str("recurring_event_id") || null,
+            oneOnOnePartner: str("one_on_one_with") || null,
             note: file,
             recording,
             status: str("status") || null,
@@ -1884,7 +1896,10 @@ export default class SystemRecordingPlugin extends Plugin {
             }));
             const expired = findExpiredRecordings(files, {
                 folders: [
-                    this.settings.meetingsFolder.trim() || "Meetings",
+                    templateStaticRoot(this.settings.oneOffFolderTemplate),
+                    templateStaticRoot(this.settings.seriesFolderTemplate),
+                    normalizeFolderPath(this.settings.adhocFolder),
+                    normalizeFolderPath(this.settings.oneOnOneFolder),
                     this.settings.recordingFolder.trim() || "recordings",
                 ],
                 retentionDays: this.settings.retentionDays,
@@ -1958,8 +1973,7 @@ export default class SystemRecordingPlugin extends Plugin {
      * survive re-runs.
      */
     private async createDashboard(): Promise<void> {
-        const folder = this.settings.meetingsFolder.trim().replace(/\/+$/, "") ||
-            "Meetings";
+        const folder = templateStaticRoot(this.settings.oneOffFolderTemplate);
         if (!(await this.app.vault.adapter.exists(folder))) {
             await this.app.vault
                 .createFolder(folder)

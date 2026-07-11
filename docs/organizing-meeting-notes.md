@@ -1,6 +1,13 @@
 # Organizing meeting notes: strategy proposal
 
-Status: draft for discussion.
+Status: accepted; implemented in #42.
+
+## Decisions
+
+- No series hub note (open question 1): a new occurrence follows the most recent note's folder (item 2 below), not a dedicated anchor file.
+- No "where should this series live?" prompt (open question 2): folder resolution is deterministic, so there's nothing to ask.
+- 1:1s are first-class (open question 3), behind a "Handle 1:1s separately" toggle, off by default. When it's on, a 1:1 gets its own per-person folder under a configurable "One-on-one folder" setting instead of following the series/one-off rules.
+- Ad-hoc meetings get their own "Ad-hoc meetings folder" setting (open question 4) rather than sharing the one-off template.
 
 ## The problem
 

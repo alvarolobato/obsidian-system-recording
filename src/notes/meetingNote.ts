@@ -26,12 +26,22 @@ export interface MeetingEventInfo {
 	organizer: string | null;
 	iCalUID: string | null;
 	recurringEventId: string | null;
+	/** The other attendee's display name (or email) for a 1:1; null for anything else. */
+	oneOnOnePartner: string | null;
 }
 
 /** How the note's path/name and body are produced from a meeting. */
 export interface MeetingNoteConfig {
-	/** Base folder for meeting notes. */
-	baseFolder: string;
+	/** `{{placeholder}}` folder template for one-off meetings, e.g. "Meetings/{{year}}". */
+	oneOffFolderTemplate: string;
+	/** `{{placeholder}}` folder template for a new recurring series, e.g. "Meetings/{{series}}". */
+	seriesFolderTemplate: string;
+	/** When on, 1:1s get their own per-person folder instead of following the series/one-off rules. */
+	oneOnOneSeparately: boolean;
+	/** Parent folder for a 1:1's per-person subfolder. */
+	oneOnOneFolder: string;
+	/** Folder for unplanned (ad-hoc) meetings. */
+	adhocFolder: string;
 	/** `{{placeholder}}` pattern for the note title / filename. */
 	titlePattern: string;
 	/** `{{placeholder}}` template for the note body. */
@@ -90,15 +100,107 @@ export function dateTimePrefix(d: Date): string {
 }
 
 /**
- * Folder for a meeting. Recurring events get a per-series subfolder so every
- * occurrence (note + recording) lives together; one-off events go in the base folder.
+ * Normalizes a user- or template-rendered folder path: trims it, drops a
+ * trailing slash, sanitizes each segment (so a rendered `{{title}}` carrying a
+ * `/` or `:` can't escape the intended folder or break Obsidian), and drops
+ * empty segments. Falls back to "Meetings" when nothing is left.
  */
-export function meetingFolder(baseFolder: string, ev: MeetingEventInfo): string {
-	const base = (baseFolder.trim().replace(/\/+$/, "") || "Meetings");
-	if (ev.recurringEventId) {
-		return normalizePath(`${base}/${sanitizeName(ev.summary)}`);
+export function normalizeFolderPath(input: string): string {
+	const segments = input
+		.trim()
+		.replace(/\/+$/, "")
+		.split("/")
+		.filter((s) => s.trim().length > 0)
+		.map((s) => sanitizeName(s));
+	const joined = segments.join("/");
+	return joined.length > 0 ? normalizePath(joined) : "Meetings";
+}
+
+/**
+ * The literal, token-free prefix of a folder template (e.g. "Meetings" from
+ * "Meetings/{{year}}"), for callers that need a single stable folder to scope
+ * a scan to rather than resolving a specific event's folder.
+ */
+export function templateStaticRoot(template: string): string {
+	const idx = template.indexOf("{{");
+	return normalizeFolderPath(idx === -1 ? template : template.slice(0, idx));
+}
+
+function frontmatterOf(app: App, file: TFile): Record<string, unknown> | undefined {
+	return app.metadataCache.getFileCache(file)?.frontmatter as
+		| Record<string, unknown>
+		| undefined;
+}
+
+/** The folder holding a note, or "" for the vault root. */
+function folderOf(file: TFile): string {
+	return file.parent?.path ?? "";
+}
+
+/**
+ * The most recently-started note whose `key` frontmatter equals `value`, by
+ * lexicographic max of the `start` frontmatter string (falling back to
+ * `date`); notes with neither are skipped. This is how a series or a 1:1's
+ * folder "follows" wherever its notes currently live.
+ */
+function mostRecentNoteBy(app: App, key: string, value: string): TFile | null {
+	let best: TFile | null = null;
+	let bestStamp = "";
+	for (const file of app.vault.getMarkdownFiles()) {
+		const fm = frontmatterOf(app, file);
+		if (!fm || fm[key] !== value) continue;
+		const stamp = fm["start"] ?? fm["date"];
+		if (typeof stamp !== "string" || stamp.length === 0) continue;
+		if (!best || stamp > bestStamp) {
+			best = file;
+			bestStamp = stamp;
+		}
 	}
-	return normalizePath(base);
+	return best;
+}
+
+/**
+ * Scans the vault for a note whose `event_id` frontmatter matches, so a note
+ * that was moved or renamed is still found by identity rather than by the
+ * path the plugin would otherwise compute for it. Returns null for an empty id.
+ */
+export function findNoteByEventId(app: App, eventId: string): TFile | null {
+	if (!eventId) return null;
+	for (const file of app.vault.getMarkdownFiles()) {
+		const fm = frontmatterOf(app, file);
+		if (fm && fm["event_id"] === eventId) return file;
+	}
+	return null;
+}
+
+/**
+ * Folder for a *new* meeting note (only consulted once `findNoteByEventId`
+ * comes up empty). Order: a 1:1 routed separately follows its partner's
+ * folder (or starts one under `oneOnOneFolder`); a recurring event follows
+ * its series' current folder (or renders `seriesFolderTemplate` for a series
+ * with no notes yet); an ad-hoc meeting goes to `adhocFolder`; everything
+ * else renders `oneOffFolderTemplate`. A 1:1 series is matched by rule 1
+ * before rule 2 when `oneOnOneSeparately` is on; with it off, rule 2 applies.
+ */
+export function resolveMeetingFolder(
+	app: App,
+	ev: MeetingEventInfo,
+	cfg: MeetingNoteConfig
+): string {
+	if (cfg.oneOnOneSeparately && ev.oneOnOnePartner) {
+		const home = mostRecentNoteBy(app, "one_on_one_with", ev.oneOnOnePartner);
+		if (home) return folderOf(home);
+		return normalizeFolderPath(`${cfg.oneOnOneFolder}/${ev.oneOnOnePartner}`);
+	}
+	if (ev.recurringEventId) {
+		const home = mostRecentNoteBy(app, "recurring_event_id", ev.recurringEventId);
+		if (home) return folderOf(home);
+		return normalizeFolderPath(renderTemplate(cfg.seriesFolderTemplate, ev));
+	}
+	if (ev.id.startsWith("adhoc-")) {
+		return normalizeFolderPath(cfg.adhocFolder);
+	}
+	return normalizeFolderPath(renderTemplate(cfg.oneOffFolderTemplate, ev));
 }
 
 /**
@@ -156,19 +258,56 @@ function resolveNotePath(
 	return candidate;
 }
 
+/** Writes the frontmatter this plugin manages, regardless of how the note was found. */
+async function stampFrontmatter(
+	app: App,
+	file: TFile,
+	ev: MeetingEventInfo
+): Promise<void> {
+	await app.fileManager.processFrontMatter(file, (fm) => {
+		const f = fm as Record<string, unknown>;
+		f.title = ev.summary;
+		f.date = dateOnly(ev.start);
+		f.start = localIso(ev.start);
+		f.end = localIso(ev.end);
+		f.event_id = ev.id;
+		if (ev.iCalUID) f.ical_uid = ev.iCalUID;
+		if (ev.recurringEventId) f.recurring_event_id = ev.recurringEventId;
+		if (ev.meetLink) f.meeting_url = ev.meetLink;
+		if (ev.location) f.location = ev.location;
+		if (ev.organizer) f.organizer = ev.organizer;
+		if (ev.oneOnOnePartner) f.one_on_one_with = ev.oneOnOnePartner;
+		f.attendees = ev.attendees;
+		if (!f.status) f.status = "scheduled";
+	});
+}
+
 /**
- * Creates (or reuses) the meeting note and writes its frontmatter. Idempotent:
- * a note at the same path is reused rather than overwritten, so pressing the
- * start button twice for one occurrence is safe. The body comes from the
- * user's template; the frontmatter below is always managed here so the agenda
- * and recording-linking keep working regardless of the template.
+ * Creates (or reuses) the meeting note and writes its frontmatter. Identity
+ * comes first: a note carrying this event's `event_id` anywhere in the vault
+ * is reused wherever it lives, so a note the user moved is never duplicated.
+ * Only when none exists does this compute a fresh path (folder resolution +
+ * collision-safe basename) and create it. The body comes from the user's
+ * template; the frontmatter below is always managed here so the agenda and
+ * recording-linking keep working regardless of the template.
  */
 export async function createMeetingNote(
 	app: App,
 	ev: MeetingEventInfo,
 	cfg: MeetingNoteConfig
 ): Promise<MeetingNoteRef> {
-	const folder = meetingFolder(cfg.baseFolder, ev);
+	const byIdentity = findNoteByEventId(app, ev.id);
+	if (byIdentity) {
+		await stampFrontmatter(app, byIdentity, ev);
+		return {
+			file: byIdentity,
+			notePath: byIdentity.path,
+			folder: folderOf(byIdentity),
+			basename: byIdentity.basename,
+		};
+	}
+
+	const folder = resolveMeetingFolder(app, ev, cfg);
 	await ensureFolder(app, folder);
 
 	const notePath = resolveNotePath(
@@ -189,21 +328,7 @@ export async function createMeetingNote(
 			? existing
 			: await app.vault.create(notePath, renderTemplate(cfg.template, ev));
 
-	await app.fileManager.processFrontMatter(file, (fm) => {
-		const f = fm as Record<string, unknown>;
-		f.title = ev.summary;
-		f.date = dateOnly(ev.start);
-		f.start = localIso(ev.start);
-		f.end = localIso(ev.end);
-		f.event_id = ev.id;
-		if (ev.iCalUID) f.ical_uid = ev.iCalUID;
-		if (ev.recurringEventId) f.recurring_event_id = ev.recurringEventId;
-		if (ev.meetLink) f.meeting_url = ev.meetLink;
-		if (ev.location) f.location = ev.location;
-		if (ev.organizer) f.organizer = ev.organizer;
-		f.attendees = ev.attendees;
-		if (!f.status) f.status = "scheduled";
-	});
+	await stampFrontmatter(app, file, ev);
 
 	return { file, notePath, folder, basename };
 }

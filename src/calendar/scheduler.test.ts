@@ -16,6 +16,7 @@ function evt(over: Partial<ScheduledEvent> = {}): ScheduledEvent {
 		organizer: null,
 		iCalUID: null,
 		recurringEventId: null,
+		oneOnOnePartner: null,
 		...over,
 	};
 }

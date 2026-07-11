@@ -23,6 +23,8 @@ export interface AgendaMeeting {
 	organizer: string | null;
 	iCalUID: string | null;
 	recurringEventId: string | null;
+	/** The other attendee's display name (or email) for a 1:1; null for anything else. */
+	oneOnOnePartner: string | null;
 	/** The meeting note, if one has been created. */
 	note: TFile | null;
 	/** The recording linked from the note, if any. */
@@ -83,6 +85,7 @@ export function toAgendaMeeting(
 		organizer: ev.organizer,
 		iCalUID: ev.iCalUID,
 		recurringEventId: ev.recurringEventId,
+		oneOnOnePartner: ev.oneOnOnePartner,
 		note: state?.file ?? null,
 		recording: state?.recording ?? null,
 		status: state?.status ?? null,
@@ -103,5 +106,6 @@ export function toMeetingInfo(m: AgendaMeeting): MeetingEventInfo {
 		organizer: m.organizer,
 		iCalUID: m.iCalUID,
 		recurringEventId: m.recurringEventId,
+		oneOnOnePartner: m.oneOnOnePartner,
 	};
 }

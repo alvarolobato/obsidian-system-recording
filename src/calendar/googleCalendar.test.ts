@@ -1,5 +1,10 @@
 import { describe, it, expect, vi } from "vitest";
-import { isDeclinedByUser, collectPages } from "./googleCalendar";
+import {
+	collectPages,
+	isDeclinedByUser,
+	oneOnOnePartner,
+} from "./googleCalendar";
+
 
 describe("isDeclinedByUser", () => {
 	it("is true only when the self attendee declined", () => {
@@ -80,5 +85,52 @@ describe("collectPages", () => {
 		const all = await collectPages<number>(fetchPage);
 		expect(all).toEqual([1]);
 		expect(fetchPage).toHaveBeenCalledTimes(1);
+
+describe("oneOnOnePartner", () => {
+	it("returns the other attendee when exactly two humans, one of them self", () => {
+		const partner = oneOnOnePartner([
+			{ email: "me@example.com", self: true },
+			{ email: "bob@example.com", displayName: "Bob" },
+		]);
+		expect(partner).toBe("Bob");
+	});
+
+	it("falls back to email when the partner has no displayName", () => {
+		const partner = oneOnOnePartner([
+			{ email: "me@example.com", self: true },
+			{ email: "bob@example.com" },
+		]);
+		expect(partner).toBe("bob@example.com");
+	});
+
+	it("returns null when no attendee is marked self", () => {
+		const partner = oneOnOnePartner([
+			{ email: "alice@example.com", displayName: "Alice" },
+			{ email: "bob@example.com", displayName: "Bob" },
+		]);
+		expect(partner).toBeNull();
+	});
+
+	it("returns null for a group meeting (three or more attendees)", () => {
+		const partner = oneOnOnePartner([
+			{ email: "me@example.com", self: true },
+			{ email: "bob@example.com", displayName: "Bob" },
+			{ email: "carol@example.com", displayName: "Carol" },
+		]);
+		expect(partner).toBeNull();
+	});
+
+	it("ignores a meeting room resource, still yielding a partner for the two humans", () => {
+		const partner = oneOnOnePartner([
+			{ email: "me@example.com", self: true },
+			{ email: "bob@example.com", displayName: "Bob" },
+			{ email: "room-12@resource.calendar.google.com", resource: true },
+		]);
+		expect(partner).toBe("Bob");
+	});
+
+	it("returns null for an empty or undefined attendee list", () => {
+		expect(oneOnOnePartner(undefined)).toBeNull();
+		expect(oneOnOnePartner([])).toBeNull();
 	});
 });
