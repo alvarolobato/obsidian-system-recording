@@ -1,7 +1,7 @@
 {
 	"id": "meeting-copilot",
 	"name": "Meeting Copilot",
-	"version": "1.0.4",
+	"version": "0.1.0",
 	"minAppVersion": "0.15.0",
 	"description": "Calendar-driven meeting notes with dual-channel (system + mic) recording for Zoom, Meet, and Teams. Based on System Recording by Yuto Takagi.",
 	"author": "Alvaro Lobato",

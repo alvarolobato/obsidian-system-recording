@@ -2,7 +2,7 @@
 export const EXPECTED_SHA256 =
 	"8a5326ea84eff8f8a3221e8584b86a2515680f6e575b7cc3e6301fa949560cf2";
 
-const REPO = "yut0takagi/obsidian-system-recording";
+const REPO = "alvarolobato/obsidian-meeting-copilot";
 
 /** GitHub release asset URL for the system-recorder binary of the given plugin version. */
 export function releaseUrl(version: string): string {

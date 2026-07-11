@@ -1,0 +1,36 @@
+name: CI
+
+# Validates every pull request (and pushes to main): type-check, lint, tests,
+# and a production build. Keep this green before merging.
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        # See supported Node.js release schedule at https://nodejs.org/en/about/releases/
+        node-version: [20.x, 22.x]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Use Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: npm
+      - run: npm ci
+      - run: npm run lint
+      - run: npm test
+      # `npm run build` also runs `tsc --noEmit`, so this covers type-checking.
+      - run: npm run build
+
+  # The release builds the Swift helper on macOS; verify it compiles on PRs too
+  # so a broken helper can't pass CI and only fail at release time.
+  swift:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - run: npm run build:swift

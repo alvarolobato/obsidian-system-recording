@@ -1,0 +1,133 @@
+name: Release
+
+# Cut a release by pushing a version tag that matches the manifest version, e.g.:
+#   git tag 1.0.5 && git push origin 1.0.5
+# The tag name becomes the release version (no "v" prefix — Obsidian & BRAT
+# expect the release tag to equal manifest.json "version").
+on:
+  push:
+    tags:
+      - "[0-9]+.[0-9]+.[0-9]+"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Version to release (e.g. 1.0.5)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    # Apple Silicon runner: the system-recorder helper must be an arm64 binary.
+    runs-on: macos-14
+    steps:
+      # Resolve + validate the version before checkout so we can check out the
+      # tagged commit on manual dispatch (this step reads only inputs/env).
+      - name: Resolve version
+        id: v
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ inputs.tag }}"
+          else
+            TAG="${GITHUB_REF_NAME}"
+          fi
+          # Guard against typos (e.g. "v0.1.0", "0.1") that would ship a broken release.
+          if ! [[ "${TAG}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Version tag must be semver without a 'v' prefix (got '${TAG}')"
+            exit 1
+          fi
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+
+      # On manual dispatch, build the tagged commit (not branch HEAD) so the
+      # published artifacts match the tag. Tag pushes already resolve to the tag.
+      - uses: actions/checkout@v4
+        with:
+          ref: >-
+            ${{ github.event_name == 'workflow_dispatch'
+              && format('refs/tags/{0}', steps.v.outputs.tag)
+              || github.ref }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20.x
+          cache: npm
+
+      - run: npm ci
+
+      - name: Lint & test
+        run: |
+          npm run lint
+          npm test
+
+      - name: Sync manifest/versions to the release tag
+        env:
+          TAG: ${{ steps.v.outputs.tag }}
+        run: |
+          node -e '
+            const fs = require("fs");
+            const v = process.env.TAG;
+            const m = JSON.parse(fs.readFileSync("manifest.json", "utf8"));
+            m.version = v;
+            fs.writeFileSync("manifest.json", JSON.stringify(m, null, "\t") + "\n");
+            const vs = JSON.parse(fs.readFileSync("versions.json", "utf8"));
+            vs[v] = m.minAppVersion;
+            fs.writeFileSync("versions.json", JSON.stringify(vs, null, "\t") + "\n");
+            const pkg = JSON.parse(fs.readFileSync("package.json", "utf8"));
+            pkg.version = v;
+            fs.writeFileSync("package.json", JSON.stringify(pkg, null, "\t") + "\n");
+          '
+
+      - name: Build Swift helper (arm64)
+        run: npm run build:swift
+
+      - name: Stage helper binary + compute checksum
+        id: sha
+        run: |
+          cp swift-helper/.build/release/SystemRecorder system-recorder
+          chmod +x system-recorder
+          SHA=$(shasum -a 256 system-recorder | cut -d' ' -f1)
+          echo "sha256=${SHA}" >> "$GITHUB_OUTPUT"
+          echo "Helper SHA-256: ${SHA}"
+
+      - name: Pin helper checksum into the plugin build
+        env:
+          SHA: ${{ steps.sha.outputs.sha256 }}
+        run: |
+          node -e '
+            const fs = require("fs");
+            const p = "src/binary.ts";
+            const sha = process.env.SHA;
+            const s = fs.readFileSync(p, "utf8").replace(
+              /EXPECTED_SHA256\s*=\s*"[0-9a-f]*"/,
+              `EXPECTED_SHA256 =\n\t"${sha}"`
+            );
+            // Fail loudly if the pattern stopped matching: otherwise we would ship a
+            // main.js whose embedded hash does not match the attached helper binary,
+            // giving every user a permanent "Recorder helper failed verification" error.
+            if (!s.includes(`"${sha}"`)) {
+              console.error("Failed to pin EXPECTED_SHA256 in src/binary.ts");
+              process.exit(1);
+            }
+            fs.writeFileSync(p, s);
+          '
+
+      - name: Build plugin
+        run: npm run build
+
+      - name: Create or update GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.v.outputs.tag }}
+        run: |
+          # Idempotent: re-runs (or retries after a partial failure) refresh the
+          # assets on an existing release instead of erroring out.
+          if gh release view "${TAG}" >/dev/null 2>&1; then
+            gh release upload "${TAG}" --clobber \
+              main.js manifest.json styles.css system-recorder
+          else
+            gh release create "${TAG}" \
+              --title "${TAG}" \
+              --generate-notes \
+              main.js manifest.json styles.css system-recorder
+          fi

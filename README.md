@@ -35,11 +35,24 @@ Meeting Copilot handles calendar, recording, transcription, and enrichment on it
 
 ## Installation
 
-1. Build or download `main.js`, `manifest.json`, and `styles.css`.
+**Option A — BRAT (recommended for updates):** install the [BRAT](https://github.com/TfTHacker/obsidian42-brat) community plugin, then *Add beta plugin* with `alvarolobato/obsidian-meeting-copilot`. BRAT installs from the latest [GitHub release](https://github.com/alvarolobato/obsidian-meeting-copilot/releases) and keeps it up to date.
+
+**Option B — manual:**
+
+1. From the [latest release](https://github.com/alvarolobato/obsidian-meeting-copilot/releases/latest), download `main.js`, `manifest.json`, `styles.css` (and optionally the `system-recorder` helper).
 2. Copy them into `.obsidian/plugins/meeting-copilot/` in your vault.
 3. In Obsidian, enable **Meeting Copilot** under *Settings → Community plugins*.
+
+Then, regardless of method:
+
 4. Optionally install the plugins from the table above (Dataview, Tasks).
-5. On your first recording, the macOS helper (`system-recorder`) is downloaded and verified (SHA-256), then macOS prompts for **Screen Recording** and **Microphone** permissions — grant both. (You can also ship a prebuilt helper next to `main.js`; see [Development](#development).)
+5. On your first recording, the macOS helper (`system-recorder`) is downloaded from the matching release and verified (SHA-256) if you didn't already copy it in. macOS then prompts for **Screen Recording** and **Microphone** permissions — grant both, then fully quit and reopen Obsidian. (Apple Silicon / arm64 only.)
+
+### Updating
+
+- **BRAT (Option A)** auto-updates: it watches this repo's [releases](https://github.com/alvarolobato/obsidian-meeting-copilot/releases) and pulls new versions (enable *Auto-update plugins at startup* in BRAT's settings, or run *BRAT: Check for updates*). After an update, the plugin re-downloads the matching `system-recorder` helper on the next recording.
+- **Manual (Option B)** installs do **not** auto-update — download the new release assets and replace the files in `.obsidian/plugins/meeting-copilot/` when a new version ships. Your settings (`data.json`) are preserved.
+- Obsidian's built-in *Check for updates* only covers plugins in the official community store, so it will **not** update this plugin. Use BRAT.
 
 ## Setup
 
@@ -95,6 +108,16 @@ npm test && npm run lint
 ### The macOS helper (`system-recorder`)
 
 Obsidian's community store distributes only `main.js` / `manifest.json` / `styles.css`, not native binaries. The plugin downloads the `system-recorder` helper on first use from the GitHub release whose tag matches `manifest.json`'s `version`, and verifies it against `EXPECTED_SHA256` in [`src/binary.ts`](src/binary.ts). If you publish your own release, point `REPO` / `EXPECTED_SHA256` in `src/binary.ts` at it, or simply ship a prebuilt `system-recorder` next to `main.js`.
+
+### Releasing
+
+Releases are automated by [`.github/workflows/release.yml`](.github/workflows/release.yml). To cut a release, push a version tag (no `v` prefix, matching the target `manifest.json` version):
+
+```bash
+git tag 1.0.5 && git push origin 1.0.5
+```
+
+On an Apple-Silicon runner the workflow lints/tests, syncs `manifest.json` / `versions.json` to the tag, builds the Swift helper, pins its SHA-256 into the build, builds the plugin, and publishes a GitHub release with `main.js`, `manifest.json`, `styles.css`, and `system-recorder` attached. (You can also trigger it manually via *Actions → Release → Run workflow*.)
 
 ## Attribution
 
