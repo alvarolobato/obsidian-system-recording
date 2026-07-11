@@ -1436,14 +1436,8 @@ export default class SystemRecordingPlugin extends Plugin {
         ) {
             // Pass the fresh transcript so enrichment works even when
             // insertTranscript is off and the note has no transcript yet.
+            // enrichMeetingNote also offers an AI title for unplanned meetings.
             await this.enrichMeetingNote(enrichTarget, transcriptText ?? undefined);
-            // After the AI summary, offer a generated title for unplanned meetings.
-            if (this.settings.suggestAdhocTitle && this.isAdhocNote(enrichTarget)) {
-                await this.suggestAdhocTitle(
-                    enrichTarget,
-                    transcriptText ?? undefined
-                );
-            }
         }
         return enrichTarget !== null;
     }
@@ -1479,6 +1473,7 @@ export default class SystemRecordingPlugin extends Plugin {
             return;
         }
         this.enrichingPaths.add(file.path);
+        let enrichedOk = false;
         try {
             const content = await this.app.vault.read(file);
             const notes = extractSection(content, "## Notes");
@@ -1538,6 +1533,7 @@ export default class SystemRecordingPlugin extends Plugin {
             new Notice(t().notices.enrichDone(file.basename));
             this.setActionStatus(t().statusBar.enriched, "success");
             this.agendaEvents.emit("changed", undefined);
+            enrichedOk = true;
         } catch (e) {
             new Notice(
                 t().notices.enrichError(e instanceof Error ? e.message : String(e))
@@ -1546,6 +1542,25 @@ export default class SystemRecordingPlugin extends Plugin {
         } finally {
             this.enrichingPaths.delete(file.path);
         }
+
+        // After the AI summary, offer a generated title for unplanned meetings
+        // (once). Scheduled meetings keep their calendar title.
+        if (
+            enrichedOk &&
+            this.settings.suggestAdhocTitle &&
+            this.isAdhocNote(file) &&
+            !this.titleAlreadySuggested(file)
+        ) {
+            await this.suggestAdhocTitle(file, transcriptOverride);
+        }
+    }
+
+    /** True once we've offered an AI title for this note (flagged in frontmatter). */
+    private titleAlreadySuggested(file: TFile): boolean {
+        const fm = this.app.metadataCache.getFileCache(file)?.frontmatter as
+            | Record<string, unknown>
+            | undefined;
+        return fm?.["mc_title_suggested"] === true;
     }
 
     /** True for unplanned meetings (ad-hoc/detected), whose event_id we prefix "adhoc-". */
@@ -1587,6 +1602,11 @@ export default class SystemRecordingPlugin extends Plugin {
             this.clearActionStatus();
             const title = this.cleanSuggestedTitle(raw);
             if (!title) return;
+
+            // Mark as offered so we don't re-prompt on a later re-enrich.
+            await this.app.fileManager.processFrontMatter(file, (f) => {
+                (f as Record<string, unknown>).mc_title_suggested = true;
+            });
 
             const prefix = this.datePrefixOf(file);
             const suggested = prefix ? `${prefix} ${title}` : title;
