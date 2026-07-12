@@ -3,7 +3,7 @@ import AVFoundation
 
 // MARK: - Argument parsing
 
-let usage = "Usage: system-recorder start --output <path> --stop-file <path> [--split] [--format wav|m4a]"
+let usage = "Usage: system-recorder start --output <path> --stop-file <path> [--split] [--format \(RecordingFormat.usageList)]"
 
 // MARK: - JSON output helper
 
@@ -153,7 +153,14 @@ if #available(macOS 13.0, *) {
                     emitJSON(stopped)
                     exit(0)
                 } catch {
-                    emitJSON(["status": "error", "message": "Failed to finalize recording: \(error.localizedDescription)"])
+                    // Name the surviving temp PCM files: a failed encode must
+                    // not leave the only copy of the meeting unfindable.
+                    var message = "Failed to finalize recording: \(error.localizedDescription)"
+                    let salvage = mixer.salvageablePaths
+                    if !salvage.isEmpty {
+                        message += " — captured audio preserved at: \(salvage.joined(separator: ", "))"
+                    }
+                    emitJSON(["status": "error", "message": message])
                     exit(1)
                 }
             }

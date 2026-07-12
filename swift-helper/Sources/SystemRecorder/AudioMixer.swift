@@ -5,11 +5,16 @@ import CoreMedia
 /// Container/codec for the final recording and its sidecars. WAV is mono
 /// 24 kHz Int16 PCM; M4A is mono 24 kHz AAC-LC. Both share the same PCM
 /// pipeline — the format only picks the output writer.
-enum RecordingFormat: String {
+enum RecordingFormat: String, CaseIterable {
     case wav
     case m4a
 
     var fileExtension: String { rawValue }
+
+    /// "wav|m4a", for the usage string — stays honest when a case is added.
+    static var usageList: String {
+        allCases.map(\.rawValue).joined(separator: "|")
+    }
 }
 
 enum MixerError: LocalizedError {
@@ -77,6 +82,15 @@ final class AudioMixer: @unchecked Sendable {
     private let systemStream: Stream
     private let micStream: Stream
 
+    /// Temp PCM files that still hold captured audio, named in finalize error
+    /// messages so a failed encode never leaves the only copy of a meeting
+    /// unfindable in the OS temp directory.
+    var salvageablePaths: [String] {
+        [systemStream, micStream]
+            .filter { $0.framesWritten > 0 && FileManager.default.fileExists(atPath: $0.tempURL.path) }
+            .map { $0.tempURL.path }
+    }
+
     private let outputURL: URL
     private let format: RecordingFormat
     private let split: Bool
@@ -143,18 +157,21 @@ final class AudioMixer: @unchecked Sendable {
 
     // MARK: - Live conversion (shared by both streams)
 
-    /// Int16 mono WAV at the target rate, written through a float32 processing
-    /// format so converted buffers go straight in.
+    /// Int16 mono WAV at the target rate: the spec shared by the temp PCM
+    /// files and the final `.wav` output writer, defined once so the two
+    /// can't drift.
+    private static let int16WavSettings: [String: Any] = AVAudioFormat(
+        commonFormat: .pcmFormatInt16,
+        sampleRate: AudioMixer.targetSampleRate,
+        channels: 1,
+        interleaved: true
+    )!.settings
+
+    /// Temp PCM writer, fed float32 processing-format buffers.
     private func makeTempWriter(_ url: URL) throws -> AVAudioFile {
-        let wavFormat = AVAudioFormat(
-            commonFormat: .pcmFormatInt16,
-            sampleRate: AudioMixer.targetSampleRate,
-            channels: 1,
-            interleaved: true
-        )!
         return try AVAudioFile(
             forWriting: url,
-            settings: wavFormat.settings,
+            settings: AudioMixer.int16WavSettings,
             commonFormat: .pcmFormatFloat32,
             interleaved: false
         )
@@ -201,6 +218,18 @@ final class AudioMixer: @unchecked Sendable {
                 return
             }
         }
+        // Fast path: AudioCaptureManager asks the OS for the target format up
+        // front, so the common case needs no converter (and no per-callback
+        // output allocation) at all — the capture callbacks run dozens of
+        // times per second for hours.
+        if buffer.format == targetFormat {
+            do {
+                try stream.file?.write(from: buffer)
+                stream.framesWritten += AVAudioFramePosition(buffer.frameLength)
+            } catch {}
+            return
+        }
+
         if stream.converter == nil || stream.converter?.inputFormat != buffer.format {
             // Lazily created (source format is only known now); re-created if
             // the source format ever changes mid-stream.
@@ -321,12 +350,7 @@ final class AudioMixer: @unchecked Sendable {
         let settings: [String: Any]
         switch format {
         case .wav:
-            settings = AVAudioFormat(
-                commonFormat: .pcmFormatInt16,
-                sampleRate: AudioMixer.targetSampleRate,
-                channels: 1,
-                interleaved: true
-            )!.settings
+            settings = AudioMixer.int16WavSettings
         case .m4a:
             settings = [
                 AVFormatIDKey: kAudioFormatMPEG4AAC,
@@ -380,11 +404,9 @@ final class AudioMixer: @unchecked Sendable {
             for reader in [systemReader, micReader] {
                 guard let reader, reader.framePosition < reader.length else { continue }
                 readBuffer.frameLength = 0
-                do {
-                    try reader.read(into: readBuffer, frameCount: capacity)
-                } catch {
-                    throw MixerError.cannotOpenStream(error.localizedDescription)
-                }
+                // A read failure propagates as-is; main.swift wraps it with
+                // context and the salvageable temp paths.
+                try reader.read(into: readBuffer, frameCount: capacity)
                 let frames = Int(readBuffer.frameLength)
                 guard frames > 0, let src = readBuffer.floatChannelData?[0] else { continue }
                 for i in 0..<frames {
@@ -424,12 +446,8 @@ final class AudioMixer: @unchecked Sendable {
         // them + windows from the system stream; me + windows from the mic
         // stream when present. One chunked pass over each temp file both
         // re-encodes it into the output format and derives the speech windows.
-        let themIntervals = systemStream.framesWritten > 0
-            ? writeSidecarBestEffort(from: systemStream.tempURL, to: themSidecarURL)
-            : []
-        let meIntervals = micStream.framesWritten > 0
-            ? writeSidecarBestEffort(from: micStream.tempURL, to: meSidecarURL)
-            : []
+        let themIntervals = writeSidecarBestEffort(from: systemStream, to: themSidecarURL)
+        let meIntervals = writeSidecarBestEffort(from: micStream, to: meSidecarURL)
 
         let speech: [String: Any] = ["me": meIntervals, "them": themIntervals]
         if let data = try? JSONSerialization.data(withJSONObject: speech) {
@@ -439,11 +457,14 @@ final class AudioMixer: @unchecked Sendable {
 
     // Sidecars are an analysis-side extra: a failure here must never abort the
     // finished primary recording (the plugin skips missing sidecars and falls
-    // back to transcribing the mixed file). On failure the partial sidecar is
-    // removed so discovery-by-naming can't pick up a corrupt stream.
-    private func writeSidecarBestEffort(from tempURL: URL, to url: URL) -> [[Double]] {
+    // back to transcribing the mixed file). This owns the whole "should this
+    // stream get a sidecar" decision: an empty stream yields no sidecar, and
+    // on failure the partial file is removed so discovery-by-naming can't
+    // pick up a corrupt stream.
+    private func writeSidecarBestEffort(from stream: Stream, to url: URL) -> [[Double]] {
+        guard stream.framesWritten > 0 else { return [] }
         do {
-            return try writeSidecarWithSpeech(from: tempURL, to: url)
+            return try writeSidecarWithSpeech(from: stream.tempURL, to: url)
         } catch {
             try? FileManager.default.removeItem(at: url)
             return []
@@ -454,7 +475,11 @@ final class AudioMixer: @unchecked Sendable {
     // speech intervals in one chunked pass; nothing full-length is ever in
     // RAM. Speech detection: RMS over fixed 0.5 s windows, thresholded, then
     // windows closer than the merge gap are joined into [startSec, endSec]
-    // intervals. Same window size, threshold, and merge gap as always.
+    // intervals. Window size, threshold, and merge gap are unchanged, but the
+    // RMS now runs on the 24 kHz mono downmix instead of the native capture
+    // channels: content hard-panned to one stereo channel measures ~3 dB
+    // lower than before ((L+R)/2 vs per-channel RMS). Typical centered voice
+    // is unaffected, and the threshold keeps 10-20 dB of headroom over it.
     private func writeSidecarWithSpeech(from tempURL: URL, to url: URL) throws -> [[Double]] {
         let reader = try openReader(tempURL)
         let outFile = try makeOutputWriter(url)
@@ -483,11 +508,7 @@ final class AudioMixer: @unchecked Sendable {
 
         while reader.framePosition < reader.length {
             chunkBuffer.frameLength = 0
-            do {
-                try reader.read(into: chunkBuffer, frameCount: AudioMixer.chunkFrames)
-            } catch {
-                throw MixerError.cannotOpenStream(error.localizedDescription)
-            }
+            try reader.read(into: chunkBuffer, frameCount: AudioMixer.chunkFrames)
             let frames = Int(chunkBuffer.frameLength)
             guard frames > 0, let data = chunkBuffer.floatChannelData?[0] else { break }
 

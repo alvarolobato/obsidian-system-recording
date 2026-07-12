@@ -10,9 +10,19 @@
  */
 import type { SpeechWindows } from "./diarize";
 
-/** Recording containers the helper can produce (see RecordingFormat in recorder.ts). */
-const AUDIO_EXT = /\.(wav|m4a)$/i;
-const SIDECAR_AUDIO = /\.(me|them)\.(wav|m4a)$/i;
+/**
+ * Recording containers the helper can produce. The single source of truth for
+ * the TS side: RecordingFormat (recorder.ts), the sidecar regexes below, the
+ * speech.json parent candidates, and the cross-format stem collision check in
+ * main.ts are all derived from this list. The Swift mirror is RecordingFormat
+ * in AudioMixer.swift.
+ */
+export const RECORDING_FORMATS = ["wav", "m4a"] as const;
+export type RecordingFormat = (typeof RECORDING_FORMATS)[number];
+
+const FORMAT_ALTERNATION = RECORDING_FORMATS.join("|");
+const AUDIO_EXT = new RegExp(`\\.(${FORMAT_ALTERNATION})$`, "i");
+const SIDECAR_AUDIO = new RegExp(`\\.(me|them)\\.(${FORMAT_ALTERNATION})$`, "i");
 const SIDECAR_SPEECH = /\.speech\.json$/i;
 
 export interface SidecarPaths {
@@ -58,7 +68,7 @@ export function baseRecordingCandidatesOf(path: string): string[] {
 	}
 	if (SIDECAR_SPEECH.test(path)) {
 		const stem = path.replace(SIDECAR_SPEECH, "");
-		return [`${stem}.wav`, `${stem}.m4a`];
+		return RECORDING_FORMATS.map((fmt) => `${stem}.${fmt}`);
 	}
 	return [];
 }

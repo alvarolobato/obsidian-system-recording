@@ -63,6 +63,7 @@ import {
 import { canSeparateSpeakers } from "./transcribe/sttModel";
 import { probeKey } from "./transcribe/probe";
 import {
+    RECORDING_FORMATS,
     baseRecordingCandidatesOf,
     isSidecarPath,
     parseSpeechWindows,
@@ -2387,7 +2388,14 @@ export default class SystemRecordingPlugin extends Plugin {
         return this.settings.compressedRecordings ? "m4a" : "wav";
     }
 
-    /** Returns a vault-relative recording path in the configured format, appending -2, -3… if the name is taken. */
+    /**
+     * Returns a vault-relative recording path in the configured format,
+     * appending -2, -3… if the name is taken. The stem must be free across
+     * every recording format, not just the configured one: `foo.wav` and
+     * `foo.m4a` would share the extension-less `foo.speech.json` sidecar, so
+     * a new m4a next to a pre-toggle wav would overwrite the wav's speech
+     * windows and retention of one would trash the other's sidecar.
+     */
     private async uniqueRecordingPath(
         adapter: import("obsidian").DataAdapter,
         folder: string,
@@ -2395,13 +2403,21 @@ export default class SystemRecordingPlugin extends Plugin {
     ): Promise<string> {
         const ext = this.recordingFormat();
         // normalizePath drops the leading slash when folder is "" (vault root).
-        let candidate = normalizePath(`${folder}/${basename}.${ext}`);
+        const stemTaken = async (stem: string): Promise<boolean> => {
+            for (const fmt of RECORDING_FORMATS) {
+                if (await adapter.exists(normalizePath(`${stem}.${fmt}`))) {
+                    return true;
+                }
+            }
+            return false;
+        };
+        let stem = `${folder}/${basename}`;
         let n = 2;
-        while (await adapter.exists(candidate)) {
-            candidate = normalizePath(`${folder}/${basename}-${n}.${ext}`);
+        while (await stemTaken(stem)) {
+            stem = `${folder}/${basename}-${n}`;
             n++;
         }
-        return candidate;
+        return normalizePath(`${stem}.${ext}`);
     }
 
     private insertRecordingLink(fileName: string) {

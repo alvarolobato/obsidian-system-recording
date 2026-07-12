@@ -112,6 +112,14 @@ Override the target with `VAULT_PLUGIN_DIR=/path/to/vault/.obsidian/plugins/meet
 
 After deploying: **reload the plugin** in Obsidian (toggle off/on, or restart).
 
+**Helper CLI skew warning:** plain `deploy:local` re-pins the vault's *existing*
+binary, so new plugin JS runs against an old helper. An old helper silently
+ignores flags it doesn't know (e.g. `--format`), which for compressed
+recordings means WAV bytes written to a `.m4a` path and `.me.wav` sidecars the
+plugin won't discover. If the plugin↔helper CLI contract changed since the
+vault's binary was built, deploy with `--swift`. Release users are unaffected
+(provisioning pins the binary per release).
+
 ### Why the script exists (the binary-hash gotcha)
 
 The plugin verifies the `system-recorder` binary against `EXPECTED_SHA256` in

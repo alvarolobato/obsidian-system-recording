@@ -2,6 +2,9 @@ import { ChildProcess, spawn } from "child_process";
 import * as path from "path";
 import * as fs from "fs";
 import * as os from "os";
+import type { RecordingFormat } from "./transcribe/sidecar";
+
+export type { RecordingFormat };
 
 export interface RecorderStatus {
     status: "recording" | "stopped" | "error";
@@ -9,8 +12,6 @@ export interface RecorderStatus {
     file?: string;
     message?: string;
 }
-
-export type RecordingFormat = "wav" | "m4a";
 
 export interface RecorderStartOptions {
     split?: boolean;
