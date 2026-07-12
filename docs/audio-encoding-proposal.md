@@ -1,6 +1,6 @@
 # Recording format overhaul: mono 24 kHz + optional AAC (fixes #26, #8, #10, #29)
 
-Status: proposal, agreed with @alvarolobato 2026-07-12. Implementation to follow.
+Status: implemented (PR #60). Design agreed with @alvarolobato 2026-07-12.
 
 ## Problem
 

@@ -107,7 +107,7 @@ final class AudioMixer: @unchecked Sendable {
     static func sidecarURLs(forBase base: URL) -> SidecarURLs {
         let dir = base.deletingLastPathComponent()
         let stem = base.deletingPathExtension().lastPathComponent
-        let ext = base.pathExtension.isEmpty ? "wav" : base.pathExtension
+        let ext = base.pathExtension.isEmpty ? "wav" : base.pathExtension.lowercased()
         return SidecarURLs(
             me: dir.appendingPathComponent("\(stem).me.\(ext)"),
             them: dir.appendingPathComponent("\(stem).them.\(ext)"),
@@ -243,11 +243,16 @@ final class AudioMixer: @unchecked Sendable {
         guard let pcmBuffer = AVAudioPCMBuffer(pcmFormat: srcFormat, frameCapacity: frameCount) else { return }
         pcmBuffer.frameLength = frameCount
 
+        // Copy raw AudioBufferList bytes rather than going through
+        // floatChannelData, so interleaved layouts and non-float sample types
+        // survive too (floatChannelData is nil for non-float formats, which
+        // would silently yield silence). The buffers line up 1:1 because
+        // pcmBuffer was allocated with the source's own format.
         let ablPtr = UnsafeMutableAudioBufferListPointer(ablPointer)
-        let channelCount = Int(srcFormat.channelCount)
-        for ch in 0..<min(channelCount, ablPtr.count) {
-            if let src = ablPtr[ch].mData, let dst = pcmBuffer.floatChannelData?[ch] {
-                memcpy(dst, src, Int(ablPtr[ch].mDataByteSize))
+        let dstABL = UnsafeMutableAudioBufferListPointer(pcmBuffer.mutableAudioBufferList)
+        for i in 0..<min(ablPtr.count, dstABL.count) {
+            if let src = ablPtr[i].mData, let dst = dstABL[i].mData {
+                memcpy(dst, src, min(Int(ablPtr[i].mDataByteSize), Int(dstABL[i].mDataByteSize)))
             }
         }
 

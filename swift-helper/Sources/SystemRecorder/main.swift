@@ -5,9 +5,20 @@ import AVFoundation
 
 let usage = "Usage: system-recorder start --output <path> --stop-file <path> [--split] [--format wav|m4a]"
 
+// MARK: - JSON output helper
+
+func emitJSON(_ dict: [String: Any]) {
+    if let data = try? JSONSerialization.data(withJSONObject: dict),
+       let str = String(data: data, encoding: .utf8) {
+        FileHandle.standardOutput.write(Data((str + "\n").utf8))
+    }
+}
+
+// Emit through JSONSerialization, not string interpolation: messages carry
+// localizedDescriptions, and a stray quote must not produce invalid JSON for
+// the plugin's line parser.
 func fail(_ message: String) -> Never {
-    let errorJson = "{\"status\": \"error\", \"message\": \"\(message)\"}"
-    FileHandle.standardOutput.write(Data((errorJson + "\n").utf8))
+    emitJSON(["status": "error", "message": message])
     exit(1)
 }
 
@@ -50,15 +61,6 @@ let tempOutputURL = URL(fileURLWithPath: NSTemporaryDirectory())
     .appendingPathComponent(
         "system-recorder-\(ProcessInfo.processInfo.processIdentifier).\(format.fileExtension)"
     )
-
-// MARK: - JSON output helper
-
-func emitJSON(_ dict: [String: Any]) {
-    if let data = try? JSONSerialization.data(withJSONObject: dict),
-       let str = String(data: data, encoding: .utf8) {
-        FileHandle.standardOutput.write(Data((str + "\n").utf8))
-    }
-}
 
 /// Move that survives an existing destination and a cross-volume temp dir
 /// (falls back to copy+delete), and throws instead of silently dropping the
