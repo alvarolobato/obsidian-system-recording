@@ -5,17 +5,17 @@ export const DASHBOARD_END = "%% /meeting-copilot:dashboard %%";
 /** Fenced code-block language rendered by the plugin's "Needs attention" processor. */
 export const ATTENTION_BLOCK_LANG = "meeting-copilot-attention";
 
-/** Escapes a string for safe use as a Dataview `FROM "…"` source. */
-function sourceFolder(meetingsFolder: string): string {
-	return meetingsFolder.replace(/"/g, "").replace(/\/+$/, "") || "Meetings";
-}
-
 /**
  * Builds the managed Dataview block (upcoming / past meetings + open action
- * items) for a meetings folder. Pure so it can be tested without a vault.
+ * items). Deliberately vault-wide — no `FROM` — since meeting notes can live
+ * under any of several folders (per-series, per-1:1, ad-hoc, or wherever the
+ * user moved them); scoping to one folder would miss most of them. Queries
+ * match `event_id` (plugin-owned) or `meeting_url` (legacy/manual meeting
+ * notes the pre-template dashboard also listed). The task query reads the
+ * fields via `file.frontmatter` because tasks stopped inheriting page fields
+ * in newer Dataview releases. Pure so it can be tested without a vault.
  */
-export function buildDashboardBlock(meetingsFolder: string): string {
-	const folder = sourceFolder(meetingsFolder);
+export function buildDashboardBlock(): string {
 	const cols =
 		"TABLE WITHOUT ID file.link AS Meeting, " +
 		'dateformat(start, "yyyy-MM-dd HH:mm") AS Date, status AS Status, ' +
@@ -25,7 +25,6 @@ export function buildDashboardBlock(meetingsFolder: string): string {
 		"## Upcoming meetings",
 		"```dataview",
 		cols,
-		`FROM "${folder}"`,
 		// Compare against the current instant (`now`, not `date(now)` midnight)
 		// so same-day meetings that already ended fall under Past.
 		"WHERE (event_id OR meeting_url) AND start >= now",
@@ -35,16 +34,13 @@ export function buildDashboardBlock(meetingsFolder: string): string {
 		"## Past meetings",
 		"```dataview",
 		cols,
-		`FROM "${folder}"`,
 		"WHERE (event_id OR meeting_url) AND start < now",
 		"SORT start DESC",
 		"```",
 		"",
 		"## Open action items",
 		"```dataview",
-		"TASK",
-		`FROM "${folder}"`,
-		"WHERE !completed",
+		"TASK WHERE !completed AND (file.frontmatter.event_id OR file.frontmatter.meeting_url)",
 		"GROUP BY file.link",
 		"```",
 		"",

@@ -2,6 +2,7 @@ import { App, TFile } from "obsidian";
 import type { GCalEvent } from "../../calendar/googleCalendar";
 import {
 	recordingLinkTarget,
+	scanMeetingNotes,
 	type MeetingEventInfo,
 } from "../../notes/meetingNote";
 
@@ -23,6 +24,10 @@ export interface AgendaMeeting {
 	organizer: string | null;
 	iCalUID: string | null;
 	recurringEventId: string | null;
+	/** The other attendee's display name (or email) for a 1:1; null for anything else. */
+	oneOnOnePartner: string | null;
+	/** The other attendee's email for a 1:1 (lowercased/trimmed); null when unavailable. */
+	oneOnOnePartnerEmail: string | null;
 	/** The meeting note, if one has been created. */
 	note: TFile | null;
 	/** The recording linked from the note, if any. */
@@ -38,28 +43,23 @@ interface NoteIndexEntry {
 }
 
 /**
- * Scans markdown notes once and indexes meeting notes by their `event_id`
- * frontmatter so agenda rows can show note/recording state cheaply.
+ * Indexes meeting notes by their `event_id` frontmatter (via the shared
+ * `scanMeetingNotes` pass) so agenda rows can show note/recording state
+ * cheaply, without a second full-vault scan of its own.
  */
 export function buildNoteIndex(app: App): Map<string, NoteIndexEntry> {
 	const map = new Map<string, NoteIndexEntry>();
-	for (const file of app.vault.getMarkdownFiles()) {
-		const fm = app.metadataCache.getFileCache(file)?.frontmatter as
-			| Record<string, unknown>
-			| undefined;
-		if (!fm) continue;
-		const eventId = fm["event_id"];
-		if (typeof eventId !== "string" || eventId.length === 0) continue;
+	for (const entry of scanMeetingNotes(app)) {
+		if (!entry.eventId) continue;
 
 		let recording: TFile | null = null;
-		const link = recordingLinkTarget(fm["recording"]);
+		const link = recordingLinkTarget(entry.recording);
 		if (link) {
-			const dest = app.metadataCache.getFirstLinkpathDest(link, file.path);
+			const dest = app.metadataCache.getFirstLinkpathDest(link, entry.file.path);
 			if (dest instanceof TFile) recording = dest;
 		}
 
-		const status = typeof fm["status"] === "string" ? fm["status"] : null;
-		map.set(eventId, { file, status, recording });
+		map.set(entry.eventId, { file: entry.file, status: entry.status, recording });
 	}
 	return map;
 }
@@ -83,6 +83,8 @@ export function toAgendaMeeting(
 		organizer: ev.organizer,
 		iCalUID: ev.iCalUID,
 		recurringEventId: ev.recurringEventId,
+		oneOnOnePartner: ev.oneOnOnePartner,
+		oneOnOnePartnerEmail: ev.oneOnOnePartnerEmail,
 		note: state?.file ?? null,
 		recording: state?.recording ?? null,
 		status: state?.status ?? null,
@@ -103,5 +105,7 @@ export function toMeetingInfo(m: AgendaMeeting): MeetingEventInfo {
 		organizer: m.organizer,
 		iCalUID: m.iCalUID,
 		recurringEventId: m.recurringEventId,
+		oneOnOnePartner: m.oneOnOnePartner,
+		oneOnOnePartnerEmail: m.oneOnOnePartnerEmail,
 	};
 }

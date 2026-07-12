@@ -87,8 +87,10 @@ In *Settings → Meeting Copilot → AI enrichment*, enable enrichment, then cli
 
 - **Google Calendar integration**: Client ID / secret, authentication, target calendar, agenda look-ahead / look-back, exclusion keywords.
 - **Recording folder** / **File name template**: for ad-hoc recordings.
-- **Meetings folder**: where calendar meeting notes (and their recordings) are created.
-- **Recording retention (days)**: recordings older than this are trashed on startup and via *Clean up old recordings*; `0` keeps them forever. A recording is pruned only when its owning meeting note actually contains the transcript text — so notes without the transcript captured (e.g. enriched with *Insert transcript* off), orphan/ad-hoc recordings, and unrelated audio are never deleted.
+- **One-off meetings folder** / **New series folder**: `{{year}}`/`{{month}}`/`{{series}}`/`{{title}}`/`{{date}}` templates for where calendar meeting notes (and their recordings) are created. A recurring meeting's later occurrences follow wherever its folder ends up, even if you move it.
+- **Handle 1:1s separately** / **One-on-one folder**: file 1:1s (exactly one other attendee) into their own per-person folder instead of the rules above.
+- **Ad-hoc meetings folder**: where unplanned (ad-hoc or detected) meeting notes land.
+- **Recording retention (days)**: recordings older than this are trashed on startup and via *Clean up old recordings*; `0` keeps them forever. A recording is pruned only when the plugin has durably saved the transcript into its owning meeting note — so notes without the transcript captured (e.g. enriched with *Insert transcript* off), orphan/ad-hoc recordings, and unrelated audio are never deleted.
 - **AI endpoint (shared)**: OpenAI-compatible base URL + API key used for both transcription and enrichment.
 - **Transcription**: model, language, voice-activity detection, AI post-processing, custom dictionary, and **Auto-transcribe when recording stops** (headless — no dialog).
 - **AI enrichment**: enable it, pick a chat model (via **Test connection** + dropdown); optionally enrich automatically after transcription.

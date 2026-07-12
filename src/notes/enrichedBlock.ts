@@ -100,14 +100,3 @@ export function extractTranscript(content: string): string {
 	// Fallback: a plain "## Transcript" section (older notes).
 	return extractSection(content, "## Transcript");
 }
-
-/**
- * True when the note actually contains transcript text. Retention uses this
- * (not a frontmatter `status`) to decide the audio is safe to prune — a note
- * enriched with the transcript inserted stays safe, but one enriched while
- * "Insert transcript" was off has no transcript captured, so its audio is the
- * only copy and must be kept.
- */
-export function hasTranscript(content: string): boolean {
-	return extractTranscript(content).trim().length > 0;
-}

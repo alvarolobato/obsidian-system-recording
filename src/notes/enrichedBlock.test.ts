@@ -2,7 +2,6 @@ import { describe, expect, it } from "vitest";
 import {
 	extractSection,
 	extractTranscript,
-	hasTranscript,
 	stripEnriched,
 	withEnrichedBlock,
 } from "./enrichedBlock";
@@ -66,28 +65,5 @@ describe("extractTranscript", () => {
 
 	it("returns empty string when there is no transcript", () => {
 		expect(extractTranscript("# M\n\n## Notes\n\nn")).toBe("");
-	});
-});
-
-describe("hasTranscript", () => {
-	it("is true when a transcript callout has content", () => {
-		expect(
-			hasTranscript("# M\n\n> [!quote]- Transcript\n> Ann: hi\n")
-		).toBe(true);
-	});
-
-	it("is true for a legacy '## Transcript' section", () => {
-		expect(hasTranscript("# M\n\n## Transcript\n\nAnn: hi\n")).toBe(true);
-	});
-
-	it("is false when the note has only notes or an AI summary (no transcript)", () => {
-		expect(hasTranscript("# M\n\n## Notes\n\nmy note\n")).toBe(false);
-		expect(
-			hasTranscript("# M\n\n> [!ai-notes]+ AI notes\n> ### Summary\n> x\n")
-		).toBe(false);
-	});
-
-	it("is false for an empty transcript callout", () => {
-		expect(hasTranscript("# M\n\n> [!quote]- Transcript\n>\n")).toBe(false);
 	});
 });

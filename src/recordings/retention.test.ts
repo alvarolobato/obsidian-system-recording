@@ -79,6 +79,36 @@ describe("findExpiredRecordings", () => {
 		).toEqual([]);
 	});
 
+	it("sweeps an exact extraPath outside the folder scope, but not its neighbors", () => {
+		const expired = findExpiredRecordings(files, {
+			folders: ["recordings"],
+			retentionDays: 30,
+			now: NOW,
+			// "Other" also holds song.wav (old, unrelated); only the exact
+			// owned path may become eligible, never the folder around it.
+			extraPaths: new Set(["Meetings/a.wav"]),
+		});
+		expect(expired.map((f) => f.path)).toEqual([
+			"Meetings/a.wav",
+			"recordings/old.m4a",
+		]);
+	});
+
+	it("applies age and protection to extraPaths too", () => {
+		const expired = findExpiredRecordings(files, {
+			folders: [],
+			retentionDays: 30,
+			now: NOW,
+			extraPaths: new Set([
+				"Meetings/recent.wav", // too young
+				"Meetings/a.wav", // protected
+				"Other/song.wav", // eligible
+			]),
+			protectedPaths: new Set(["Meetings/a.wav"]),
+		});
+		expect(expired.map((f) => f.path)).toEqual(["Other/song.wav"]);
+	});
+
 	it("never returns protected paths", () => {
 		const expired = findExpiredRecordings(files, {
 			folders: ["Meetings"],

@@ -20,6 +20,10 @@ export interface GCalEvent {
 	iCalUID: string | null;
 	/** Present only on instances of a recurring series; points at the master event. */
 	recurringEventId: string | null;
+	/** The other attendee's display name (or email) for a 1:1; null for anything else. */
+	oneOnOnePartner: string | null;
+	/** The other attendee's email for a 1:1 (lowercased/trimmed); null when unavailable. */
+	oneOnOnePartnerEmail: string | null;
 }
 
 export interface GCalCalendar {
@@ -88,8 +92,10 @@ interface RawEvent extends RawConferenceEvent {
 	htmlLink?: string;
 	iCalUID?: string;
 	recurringEventId?: string;
-	organizer?: { email?: string; displayName?: string };
+	organizer?: { email?: string; displayName?: string; self?: boolean };
 	attendees?: RawAttendee[];
+	/** True when Google truncated the attendee list (large events). */
+	attendeesOmitted?: boolean;
 	start?: { date?: string; dateTime?: string };
 	end?: { date?: string; dateTime?: string };
 }
@@ -100,6 +106,90 @@ function mapAttendees(raw: RawAttendee[] | undefined): string[] {
 		.filter((a) => !a.resource)
 		.map((a) => (a.displayName || a.email || "").trim())
 		.filter((name) => name.length > 0);
+}
+
+/** How a raw event's 1:1 shape is judged, beyond the attendee list itself. */
+export interface OneOnOneContext {
+	/** True when the signed-in user organized the event (`organizer.self`). */
+	organizerIsSelf?: boolean;
+	/** True when Google truncated the attendee list; nothing can be inferred then. */
+	attendeesOmitted?: boolean;
+}
+
+/**
+ * The other attendee in a 1:1: exactly two non-resource attendees with
+ * exactly one of them marked `self`; or, for an event the user organized
+ * themselves (`organizerIsSelf`), exactly one non-resource attendee that
+ * isn't marked `self` — Google omits the organizer's own attendee entry on
+ * some self-organized events. Null for group meetings, a truncated attendee
+ * list (`attendeesOmitted`), a missing self flag on two attendees, a single
+ * attendee on someone else's event (foreign calendars never mark `self`, so
+ * a lone guest proves nothing), or a single attendee who *is* self. Shared by
+ * `oneOnOnePartner` and `oneOnOnePartnerEmail` so both agree on what counts
+ * as a 1:1.
+ */
+function oneOnOneOther(
+	raw: RawAttendee[] | undefined,
+	ctx: OneOnOneContext = {}
+): RawAttendee | null {
+	if (ctx.attendeesOmitted) return null;
+	const humans = (raw ?? []).filter((a) => !a.resource);
+	if (humans.length === 1) {
+		if (!ctx.organizerIsSelf) return null;
+		return humans[0]?.self === true ? null : (humans[0] ?? null);
+	}
+	if (humans.length !== 2) return null;
+	const selves = humans.filter((a) => a.self === true);
+	if (selves.length !== 1) return null;
+	return humans.find((a) => a.self !== true) ?? null;
+}
+
+/**
+ * Turns an email address into a human-friendly name for folder/label use, e.g.
+ * "sophie.smith@acme.com" → "Sophie Smith". Only a fallback for attendees that
+ * carry no display name — we never want a raw address as a 1:1 folder name.
+ */
+export function humanizeEmailName(email: string): string {
+	const local = (email.split("@")[0] ?? "").trim();
+	const words = local
+		.split(/[._+-]+/)
+		.map((w) => w.trim())
+		.filter((w) => w.length > 0)
+		.map((w) => w.charAt(0).toUpperCase() + w.slice(1));
+	return words.join(" ") || email.trim();
+}
+
+/**
+ * The other participant's full name for a 1:1, used to name their folder. Uses
+ * the invite's display name when present; otherwise humanizes the email local
+ * part (never the raw address). Null for group meetings, a missing self flag,
+ * or an unnamed/emailless partner.
+ */
+export function oneOnOnePartner(
+	raw: RawAttendee[] | undefined,
+	ctx: OneOnOneContext = {}
+): string | null {
+	const other = oneOnOneOther(raw, ctx);
+	if (!other) return null;
+	const display = (other.displayName ?? "").trim();
+	if (display.length > 0) return display;
+	const email = (other.email ?? "").trim();
+	return email.length > 0 ? humanizeEmailName(email) : null;
+}
+
+/**
+ * The other participant's email for a 1:1 (lowercased/trimmed), keyed on
+ * email rather than the mutable display label so the same person renaming
+ * themselves between events doesn't fork their notes into two folders. Null
+ * for group meetings, a missing self flag, or an emailless partner.
+ */
+export function oneOnOnePartnerEmail(
+	raw: RawAttendee[] | undefined,
+	ctx: OneOnOneContext = {}
+): string | null {
+	const other = oneOnOneOther(raw, ctx);
+	const email = (other?.email ?? "").trim().toLowerCase();
+	return email.length > 0 ? email : null;
 }
 
 async function authedGet(oauth: GoogleOAuth, url: string): Promise<unknown> {
@@ -190,6 +280,14 @@ export async function listEvents(
 			organizer,
 			iCalUID: ev.iCalUID ?? null,
 			recurringEventId: ev.recurringEventId ?? null,
+			oneOnOnePartner: oneOnOnePartner(ev.attendees, {
+				organizerIsSelf: ev.organizer?.self === true,
+				attendeesOmitted: ev.attendeesOmitted === true,
+			}),
+			oneOnOnePartnerEmail: oneOnOnePartnerEmail(ev.attendees, {
+				organizerIsSelf: ev.organizer?.self === true,
+				attendeesOmitted: ev.attendeesOmitted === true,
+			}),
 		};
 	});
 }

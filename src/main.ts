@@ -2,6 +2,7 @@ import { FileSystemAdapter, MarkdownView, Menu, normalizePath, Notice, Platform,
 import {
     DEFAULT_SETTINGS,
     inferSttApiType,
+    migrateSettings,
     STT_MODELS,
     SttApiType,
     SystemRecordingSettings,
@@ -17,20 +18,26 @@ import { parseKeywords } from "./calendar/eventFilter";
 import { CalendarScheduler, ScheduledEvent } from "./calendar/scheduler";
 import { actionNotice } from "./ui/actionNotice";
 import {
+    ADHOC_ID_PREFIX,
     createMeetingNote,
     findMeetingNoteForAudio,
+    folderOf,
     insertTranscript,
+    isAdhocId,
     linkRecording,
     MeetingEventInfo,
     MeetingNoteConfig,
+    normalizeFolderPathOrEmpty,
+    parseStampDate,
     recordingLinkTarget,
     sanitizeName,
+    scanMeetingNotes,
+    templateStaticRoot,
     upsertSection,
 } from "./notes/meetingNote";
 import {
     extractSection,
     extractTranscript,
-    hasTranscript,
     HIDE_AI_CLASS,
     withEnrichedBlock,
 } from "./notes/enrichedBlock";
@@ -41,7 +48,7 @@ import {
     withDashboardBlock,
 } from "./notes/dashboard";
 import { computeAttention, type AttentionInput } from "./notes/attention";
-import { findExpiredRecordings } from "./recordings/retention";
+import { findExpiredRecordings, underFolder } from "./recordings/retention";
 
 /** Note section that holds action-item checkboxes (obsidian-tasks compatible). */
 const ACTION_ITEMS_HEADING = "## Action items";
@@ -309,7 +316,11 @@ export default class SystemRecordingPlugin extends Plugin {
                   sttModelId?: string;
               })
             | null;
-        this.settings = Object.assign({}, DEFAULT_SETTINGS, raw ?? {});
+        this.settings = Object.assign(
+            {},
+            DEFAULT_SETTINGS,
+            migrateSettings(raw as Record<string, unknown> | null)
+        );
         // Normalize the shared endpoint (tolerate hand-edited data.json).
         this.settings.apiBaseUrl = (this.settings.apiBaseUrl ?? "").trim();
         this.settings.apiKey = (this.settings.apiKey ?? "").trim();
@@ -489,7 +500,7 @@ export default class SystemRecordingPlugin extends Plugin {
         const info: MeetingEventInfo = {
             // A stable non-empty id makes it a recognized meeting note right
             // away and avoids note-path collisions with other ad-hoc meetings.
-            id: `adhoc-${now.getTime()}`,
+            id: `${ADHOC_ID_PREFIX}${now.getTime()}`,
             summary: t().adhoc.defaultTitle,
             start: now,
             end: new Date(now.getTime() + 60 * 60 * 1000),
@@ -500,6 +511,8 @@ export default class SystemRecordingPlugin extends Plugin {
             organizer: null,
             iCalUID: null,
             recurringEventId: null,
+            oneOnOnePartner: null,
+            oneOnOnePartnerEmail: null,
         };
         try {
             const ref = await createMeetingNote(this.app, info, this.noteConfig());
@@ -584,7 +597,8 @@ export default class SystemRecordingPlugin extends Plugin {
             // ad-hoc recordings fall back to the template in the recordings folder.
             let relativePath: string;
             if (meeting) {
-                if (!(await adapter.exists(meeting.folder))) {
+                // A note at the vault root has folder "" (nothing to create).
+                if (meeting.folder && !(await adapter.exists(meeting.folder))) {
                     await adapter.mkdir(meeting.folder);
                 }
                 relativePath = await this.uniqueWavPath(
@@ -790,7 +804,7 @@ export default class SystemRecordingPlugin extends Plugin {
 	/** True when the active recording is unplanned (ad-hoc/detected), not a calendar meeting. */
 	private isAdhocRecording(): boolean {
 		const id = this.currentRecordingEventId;
-		return id === null || id.startsWith("adhoc-");
+		return id === null || isAdhocId(id);
 	}
 
 	/**
@@ -855,6 +869,8 @@ export default class SystemRecordingPlugin extends Plugin {
 			organizer: e.organizer,
 			iCalUID: e.iCalUID,
 			recurringEventId: e.recurringEventId,
+			oneOnOnePartner: e.oneOnOnePartner,
+			oneOnOnePartnerEmail: e.oneOnOnePartnerEmail,
 		}));
 	}
 
@@ -899,25 +915,46 @@ export default class SystemRecordingPlugin extends Plugin {
 
 	private noteConfig(): MeetingNoteConfig {
 		return {
-			baseFolder: this.settings.meetingsFolder,
+			oneOffFolderTemplate: this.settings.oneOffFolderTemplate,
+			seriesFolderTemplate: this.settings.seriesFolderTemplate,
+			oneOnOneSeparately: this.settings.oneOnOneSeparately,
+			oneOnOneFolder: this.settings.oneOnOneFolder,
+			adhocFolder: this.settings.adhocFolder,
 			titlePattern: this.settings.noteTitlePattern,
 			template: this.settings.noteTemplate,
 		};
 	}
 
+	/**
+	 * Distinct non-empty folders the plugin is configured to write meeting
+	 * notes under: the static (token-free) prefix of each folder template,
+	 * plus the ad-hoc and 1:1 folders. Used to scope "Needs attention" to
+	 * plugin-owned territory, and as a retention fallback for a recording
+	 * whose note was deleted.
+	 */
+	private configuredMeetingRoots(): string[] {
+		// The empty-returning normalizer, deliberately: a folder setting that
+		// normalizes to nothing must not claim the "Meetings" fallback as
+		// plugin territory for the attention scan or the retention sweep.
+		const roots = [
+			templateStaticRoot(this.settings.oneOffFolderTemplate),
+			templateStaticRoot(this.settings.seriesFolderTemplate),
+			normalizeFolderPathOrEmpty(this.settings.adhocFolder),
+			// Only claimed while the 1:1 feature is on: with it off the
+			// plugin never writes there, and a user's own folder of the same
+			// name must not become attention/retention territory.
+			...(this.settings.oneOnOneSeparately
+				? [normalizeFolderPathOrEmpty(this.settings.oneOnOneFolder)]
+				: []),
+		].filter((r) => r.length > 0);
+		return [...new Set(roots)];
+	}
+
 	private toMeetingInfo(e: ScheduledEvent): MeetingEventInfo {
 		return {
-			id: e.id,
-			summary: e.summary,
+			...e,
 			start: new Date(e.start),
 			end: new Date(e.end),
-			meetLink: e.meetLink,
-			location: e.location,
-			htmlLink: e.htmlLink,
-			attendees: e.attendees,
-			organizer: e.organizer,
-			iCalUID: e.iCalUID,
-			recurringEventId: e.recurringEventId,
 		};
 	}
 
@@ -1029,38 +1066,39 @@ export default class SystemRecordingPlugin extends Plugin {
         const d = t().dashboard.attention;
         const acts = t().agenda.actions;
 
-        const folder =
-            this.settings.meetingsFolder.trim().replace(/\/+$/, "") ||
-            "Meetings";
-        const prefix = `${folder}/`;
+        const roots = this.configuredMeetingRoots();
         const byPath = new Map<string, TFile>();
         const inputs: AttentionInput[] = [];
-        for (const f of this.app.vault.getMarkdownFiles()) {
-            if (f.path !== `${folder}.md` && !f.path.startsWith(prefix))
-                continue;
-            const fm = this.app.metadataCache.getFileCache(f)?.frontmatter as
+        // Meeting notes can live in any of several folders now (per-series,
+        // per-1:1, ad-hoc, or wherever the user moved them). A note carrying
+        // our own `event_id` is unambiguously plugin-owned and always shown;
+        // otherwise (a foreign note that merely has `meeting_url`/`recording`
+        // frontmatter) only surface it when it also lives under one of the
+        // folders we're configured to write to — surfacing Transcribe/Enrich
+        // buttons for a note the plugin doesn't own would rewrite it.
+        for (const entry of scanMeetingNotes(this.app)) {
+            const hasRecording = recordingLinkTarget(entry.recording) !== "";
+            const pluginOwned = entry.eventId !== null;
+            const legacyMatch =
+                (hasRecording || entry.hasMeetingUrl) &&
+                roots.some((root) => underFolder(entry.file.path, root));
+            if (!pluginOwned && !legacyMatch) continue;
+
+            const fm = this.app.metadataCache.getFileCache(entry.file)?.frontmatter as
                 | Record<string, unknown>
                 | undefined;
-            if (!fm) continue;
-            if (!(fm["event_id"] || fm["meeting_url"] || fm["recording"]))
-                continue;
-            const startRaw = fm["start"] ?? fm["date"];
-            const start =
-                typeof startRaw === "string" ? new Date(startRaw) : null;
-            const status =
-                typeof fm["status"] === "string" ? fm["status"] : null;
-            const titleRaw = fm["title"];
+            const titleRaw = fm?.["title"];
             const title =
                 typeof titleRaw === "string" && titleRaw
                     ? titleRaw
-                    : f.basename;
-            byPath.set(f.path, f);
+                    : entry.file.basename;
+            byPath.set(entry.file.path, entry.file);
             inputs.push({
-                path: f.path,
+                path: entry.file.path,
                 title,
-                start,
-                status,
-                hasRecording: recordingLinkTarget(fm["recording"]) !== "",
+                start: entry.stamp ? parseStampDate(entry.stamp) : null,
+                status: entry.status,
+                hasRecording,
             });
         }
 
@@ -1152,8 +1190,10 @@ export default class SystemRecordingPlugin extends Plugin {
         };
         // Fall back to "now" for missing/invalid dates so time-based actions
         // (e.g. create-and-record path templates) don't produce "Invalid Date".
+        // A bare `YYYY-MM-DD` stamp (see `parseStampDate`) is treated as local
+        // midnight rather than `new Date`'s UTC midnight.
         const toDate = (v: unknown): Date => {
-            const d = new Date(typeof v === "string" ? v : NaN);
+            const d = typeof v === "string" ? parseStampDate(v) : new Date(NaN);
             return isNaN(d.getTime()) ? new Date() : d;
         };
 
@@ -1182,6 +1222,8 @@ export default class SystemRecordingPlugin extends Plugin {
             organizer: str("organizer") || null,
             iCalUID: str("ical_uid") || null,
             recurringEventId: str("recurring_event_id") || null,
+            oneOnOnePartner: str("one_on_one_with") || null,
+            oneOnOnePartnerEmail: str("one_on_one_email") || null,
             note: file,
             recording,
             status: str("status") || null,
@@ -1822,7 +1864,7 @@ export default class SystemRecordingPlugin extends Plugin {
             | Record<string, unknown>
             | undefined;
         const id = fm?.["event_id"];
-        return typeof id === "string" && id.startsWith("adhoc-");
+        return typeof id === "string" && isAdhocId(id);
     }
 
     /**
@@ -1923,7 +1965,7 @@ export default class SystemRecordingPlugin extends Plugin {
     ): Promise<void> {
         try {
             const safeBase = sanitizeName(newBasename);
-            const folder = file.parent?.path ?? "";
+            const folder = folderOf(file);
             const pathFor = (base: string): string =>
                 normalizePath(folder ? `${folder}/${base}.md` : `${base}.md`);
             // Avoid clobbering an existing note (try " 2", " 3", …).
@@ -1983,11 +2025,32 @@ export default class SystemRecordingPlugin extends Plugin {
                 ext: f.extension,
                 mtime: f.stat.mtime,
             }));
-            const expired = findExpiredRecordings(files, {
-                folders: [
-                    this.settings.meetingsFolder.trim() || "Meetings",
+            // Scope retention to the configured roots plus the recordings
+            // folder, and additionally the exact audio files linked from
+            // plugin-owned notes (so a recording colocated with a series/1:1
+            // folder that moved elsewhere is still covered). Exact paths, not
+            // the notes' parent folders: sweeping a moved note's folder would
+            // make every old audio file in that unrelated subtree eligible.
+            const ownedRecordings = new Set<string>();
+            for (const entry of scanMeetingNotes(this.app)) {
+                if (!entry.eventId) continue;
+                const link = recordingLinkTarget(entry.recording);
+                if (!link) continue;
+                const dest = this.app.metadataCache.getFirstLinkpathDest(
+                    link,
+                    entry.file.path
+                );
+                if (dest instanceof TFile) ownedRecordings.add(dest.path);
+            }
+            const folders = [
+                ...new Set([
+                    ...this.configuredMeetingRoots(),
                     this.settings.recordingFolder.trim() || "recordings",
-                ],
+                ]),
+            ].filter((f) => f.length > 0);
+            const expired = findExpiredRecordings(files, {
+                folders,
+                extraPaths: ownedRecordings,
                 retentionDays: this.settings.retentionDays,
                 now: Date.now(),
                 protectedPaths: this.currentRecordingPath
@@ -2002,11 +2065,12 @@ export default class SystemRecordingPlugin extends Plugin {
                 // Resolve the meeting note that owns THIS audio — colocated
                 // (same folder + basename) or linked via `recording` frontmatter.
                 const note = findMeetingNoteForAudio(this.app, file);
-                // Only prune when a transcript actually exists in the owning note.
-                // Skip when there's no owning note (orphan/inline-embedded ad-hoc
-                // recordings, or unrelated user audio) or the note has captured no
-                // transcript yet — deleting those would destroy the only copy.
-                if (!note || !(await this.noteHasTranscript(note))) continue;
+                // Only prune when the plugin has durably saved the transcript
+                // into the owning note. Skip when there's no owning note
+                // (orphan/inline-embedded ad-hoc recordings, or unrelated user
+                // audio) or the transcript was never captured — deleting those
+                // would destroy the only copy.
+                if (!note || !this.noteHasSavedTranscript(note)) continue;
                 try {
                     await this.app.fileManager.trashFile(file);
                     removed++;
@@ -2039,18 +2103,20 @@ export default class SystemRecordingPlugin extends Plugin {
     }
 
     /**
-     * True when the meeting note actually contains transcript text. Reading the
-     * body (rather than trusting a `status` flag) closes a data-loss gap: with
-     * "Insert transcript" off, an enriched note carries only the AI summary, so
-     * its audio is the sole copy of the raw content and must not be pruned.
+     * True only when this plugin has durably written the transcript into the
+     * note — the `transcript_saved` flag stamped by `insertTranscript`.
+     * Retention keys on this managed flag rather than sniffing the body: a
+     * customized note template can carry a `## Transcript`/callout placeholder
+     * that looks like a real transcript, and trusting that would trash the only
+     * copy of the audio (issue #46). With "Insert transcript" off the flag is
+     * never set, so that note's audio is kept. Legacy notes transcribed before
+     * this flag existed also lack it, so their audio is kept (safe) rather than
+     * pruned. Reads frontmatter from the metadata cache; if it's unavailable we
+     * treat the transcript as unsaved and keep the audio.
      */
-    private async noteHasTranscript(note: TFile): Promise<boolean> {
-        try {
-            return hasTranscript(await this.app.vault.cachedRead(note));
-        } catch {
-            // If we can't read it, err on the side of keeping the audio.
-            return false;
-        }
+    private noteHasSavedTranscript(note: TFile): boolean {
+        const fm = this.app.metadataCache.getFileCache(note)?.frontmatter;
+        return fm?.transcript_saved === true;
     }
 
     /**
@@ -2059,8 +2125,9 @@ export default class SystemRecordingPlugin extends Plugin {
      * survive re-runs.
      */
     private async createDashboard(): Promise<void> {
-        const folder = this.settings.meetingsFolder.trim().replace(/\/+$/, "") ||
-            "Meetings";
+        // Only decides where the dashboard *note* lives; the Dataview block
+        // itself is vault-wide (see buildDashboardBlock).
+        const folder = templateStaticRoot(this.settings.oneOffFolderTemplate) || "Meetings";
         if (!(await this.app.vault.adapter.exists(folder))) {
             await this.app.vault
                 .createFolder(folder)
@@ -2069,7 +2136,7 @@ export default class SystemRecordingPlugin extends Plugin {
                 });
         }
         const path = normalizePath(`${folder}/Meetings Dashboard.md`);
-        const block = buildDashboardBlock(folder);
+        const block = buildDashboardBlock();
         const existing = this.app.vault.getAbstractFileByPath(path);
         let file: TFile;
         if (existing instanceof TFile) {
@@ -2100,6 +2167,12 @@ export default class SystemRecordingPlugin extends Plugin {
         // to the path captured at start.
         const noteRef = this.currentMeetingNote;
         const notePath = noteRef?.path ?? this.currentMeetingNotePath;
+        // Captured before the block below nulls it: the recorder wrote the WAV
+        // to wherever recording *started*, which is no longer the note's folder
+        // if the note was moved mid-recording. Deriving the link from the
+        // note's current path in that case would point at a path the file was
+        // never written to, breaking auto-transcribe.
+        const recordingPath = this.currentRecordingPath;
         this.currentMeetingNotePath = null;
         this.currentMeetingNote = null;
         this.currentRecordingEventId = null;
@@ -2109,11 +2182,14 @@ export default class SystemRecordingPlugin extends Plugin {
             const file =
                 noteRef ?? this.app.vault.getAbstractFileByPath(notePath);
             if (file instanceof TFile) {
-                // Qualify the link with the recording's folder (it's colocated
-                // with the note) so duplicate basenames elsewhere can't resolve
-                // to the wrong file.
-                const slash = notePath.lastIndexOf("/");
-                const folder = slash >= 0 ? notePath.slice(0, slash) : "";
+                // Qualify the link with the folder the recording actually lives
+                // in (see `recordingPath` above), so duplicate basenames
+                // elsewhere can't resolve to the wrong file.
+                const dirOf = (p: string): string => {
+                    const slash = p.lastIndexOf("/");
+                    return slash >= 0 ? p.slice(0, slash) : "";
+                };
+                const folder = dirOf(recordingPath ?? notePath);
                 const link = folder ? `${folder}/${fileName}` : fileName;
                 try {
                     await linkRecording(this.app, file, link);
@@ -2181,10 +2257,11 @@ export default class SystemRecordingPlugin extends Plugin {
         folder: string,
         basename: string
     ): Promise<string> {
-        let candidate = `${folder}/${basename}.wav`;
+        // normalizePath drops the leading slash when folder is "" (vault root).
+        let candidate = normalizePath(`${folder}/${basename}.wav`);
         let n = 2;
         while (await adapter.exists(candidate)) {
-            candidate = `${folder}/${basename}-${n}.wav`;
+            candidate = normalizePath(`${folder}/${basename}-${n}.wav`);
             n++;
         }
         return candidate;
