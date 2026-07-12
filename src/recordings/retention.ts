@@ -31,6 +31,16 @@ export function isAudioExt(ext: string): boolean {
 	return AUDIO_EXTENSIONS.has(ext.toLowerCase());
 }
 
+/**
+ * True for the split recorder's speech-window sidecar (`<base>.speech.json`).
+ * These live beside the audio and are only useful for a re-transcribe, so the
+ * sweep ages them out on the same rule rather than leaving them orphaned once
+ * diarization has consumed them (or if diarization never succeeds).
+ */
+export function isSpeechSidecar(path: string): boolean {
+	return path.toLowerCase().endsWith(".speech.json");
+}
+
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 function normalizeFolder(folder: string): string {
@@ -60,7 +70,7 @@ export function findExpiredRecordings(
 	const cutoff = cfg.now - cfg.retentionDays * DAY_MS;
 	return files.filter(
 		(f) =>
-			isAudioExt(f.ext) &&
+			(isAudioExt(f.ext) || isSpeechSidecar(f.path)) &&
 			f.mtime < cutoff &&
 			(folders.some((folder) => underFolder(f.path, folder)) ||
 				extra?.has(f.path) === true) &&

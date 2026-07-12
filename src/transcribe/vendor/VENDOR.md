@@ -25,6 +25,7 @@ re-synced, **except** the small, clearly marked patches below. Grep for
 | `infrastructure/api/openai/GPT4oClient.ts` | base URL + optional wire model id from `endpointConfig` | same |
 | `infrastructure/api/dictionary/GPTDictionaryCorrectionService.ts` | base URL + optional chat model id from `endpointConfig` | GPT-assisted dictionary correction on a renaming gateway (default `gpt-4o-mini` won't exist there) |
 | `infrastructure/storage/SecurityUtils.ts` | `validateOpenAIAPIKey` accepts any non-empty key | non-`sk-` gateway keys |
+| `application/TranscriptionController.ts` | `transcribe()` also returns `segments` on its object form when the model produced timestamps (was dropped) | me-vs-them speaker separation merges two mono streams on a shared timeline and needs per-segment times (issue #32) |
 
 Two files are **added** (not from upstream):
 

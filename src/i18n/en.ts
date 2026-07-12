@@ -39,7 +39,7 @@ export const en = {
 		autoRecordDisabled: "Calendar auto-recording disabled",
 		recordingError: (msg: string) => `Recording error: ${msg}`,
 		screenPermission:
-			"Recording failed: Screen Recording isn't authorized. Open System Settings → Privacy & Security → Screen Recording, enable Obsidian, then fully quit and reopen Obsidian. (macOS requires this for capturing system audio.)",
+			"Recording failed: Screen Recording isn't authorized. Opening System Settings → Privacy & Security → Screen Recording — enable Obsidian there, then fully quit and reopen it. (macOS requires this for capturing system audio.)",
 		alreadyRecording: "Already recording",
 		macOnly: "System recording is only supported on macOS",
 		downloadingHelper: "Downloading recorder helper…",
@@ -78,6 +78,15 @@ export const en = {
 			`Transcribed "${audio}" but found no meeting note to add it to.`,
 		transcribeNoEndpoint:
 			"Set the AI endpoint (base URL + API key) in settings before transcribing.",
+		diarizationNoTimestamps:
+			"Speaker separation was skipped: the endpoint returned no timestamps this time. Run 'Test connection' to re-check.",
+	},
+	transcript: {
+		// Prepended to a speaker-separated transcript. Tells the enrichment model
+		// who "Me"/"Them" are (so it can attribute action items) and reads fine to
+		// a human skimming the note.
+		speakerBanner:
+			'[Speaker labels: "Me" is the note\'s author; "Them" are the other attendees.]',
 	},
 	statusBar: {
 		recording: (hms: string) => `Recording ${hms}`,
@@ -191,6 +200,10 @@ export const en = {
 			name: "Ad-hoc meetings folder",
 			desc: "Folder for notes from unplanned (ad-hoc or detected) meetings.",
 		},
+		recordingSubfolder: {
+			name: "Recordings subfolder",
+			desc: "Subfolder, relative to each note's own folder, where that meeting's recordings are stored (e.g. 'Recordings' → notes in 'Meetings/' record into 'Meetings/Recordings/'). Leave empty to keep audio beside the note.",
+		},
 		noteTitlePattern: {
 			name: "Note title pattern",
 			desc: "Filename pattern for meeting notes. Placeholders: {{title}}, {{date}}, {{start:FMT}}, {{end:FMT}}.",
@@ -289,15 +302,55 @@ export const en = {
 		transcriptionHeading: "Transcription",
 		sttModel: {
 			name: "Transcription model",
-			desc: "Model sent to the endpoint. Run 'Test connection' above to load the models your endpoint exposes, then pick one (or type a gateway deployment name such as llm-gateway/whisper).",
+			desc: "Model sent to the endpoint. Run 'Test connection' above (or 'Load models') to list the models your endpoint exposes — when it reports capabilities, the list is narrowed to speech-to-text models. Chat models like gpt-4o can't transcribe; use gpt-4o-transcribe or whisper. You can also type a gateway deployment name such as llm-gateway/whisper.",
 		},
 		sttApiType: {
-			name: "Transcription API",
-			desc: "Which speech-to-text API the model above speaks. Auto-detected from the model name; override it if your gateway renames models. Controls request shape, chunking, and word timestamps.",
-			gpt4o: "GPT-4o (most accurate)",
-			gpt4oMini: "GPT-4o mini (lower cost)",
+			name: "Engine (advanced)",
+			desc: "Which speech-to-text engine the model above speaks. Auto-detected from the model — only change it if your gateway's model name hides which engine it really is. Controls request shape and chunking; word timestamps are detected automatically.",
+			gpt4o: "GPT-4o transcribe (most accurate)",
+			gpt4oMini: "GPT-4o mini transcribe (lower cost)",
 			whisper: "Whisper",
-			whisperTs: "Whisper (word timestamps)",
+		},
+		diarization: {
+			name: "Separate my voice from others",
+			desc: "Transcribes the mic and system audio channels separately so your side of the conversation can be told apart from everyone else's. Roughly doubles transcription cost, and needs a Whisper model whose endpoint returns timestamps — check the Timestamp support badge above.",
+		},
+		recheckSupport: {
+			button: "Recheck",
+			tooltip:
+				"Re-test whether this model transcribes (and returns timestamps) against the current endpoint.",
+			transcribes: "This model transcribes.",
+			notTranscription:
+				"This model can't transcribe — pick a speech-to-text model (e.g. whisper or gpt-4o-transcribe).",
+			timestampsYes:
+				"Transcribes and returns timestamps — speaker separation is available.",
+			timestampsNo:
+				"Transcribes, but this endpoint doesn't return timestamps — speaker separation is unavailable.",
+			inconclusive: (detail: string) =>
+				`Couldn't verify support (${detail}). Check the endpoint/key and try again.`,
+		},
+		transcriptionBadge: {
+			name: "Transcription support",
+			supported: "Transcription: supported",
+			notSupported:
+				"Transcription: not supported — pick a speech-to-text model",
+			checking: "Transcription: checking…",
+			unknown: "Transcription: not checked yet",
+		},
+		timestampBadge: {
+			name: "Timestamp support",
+			detected: "Timestamps: detected — speaker separation available",
+			notDetected:
+				"Timestamps: not detected — speaker separation unavailable",
+			checking: "Timestamps: checking…",
+			unknown: "Timestamps: not checked yet",
+			notApplicable:
+				"Timestamps: not applicable — use a Whisper model for speaker separation",
+		},
+		loadModels: {
+			button: "Load models",
+			success: (n: number) =>
+				`Loaded ${n} model${n === 1 ? "" : "s"}.`,
 		},
 		sttLanguage: {
 			name: "Language",

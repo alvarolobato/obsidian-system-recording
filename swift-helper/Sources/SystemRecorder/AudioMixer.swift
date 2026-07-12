@@ -18,15 +18,55 @@ final class AudioMixer: @unchecked Sendable {
     private let systemTempURL: URL
     private let micTempURL: URL
 
-    init(outputURL: URL) throws {
+    private let split: Bool
+
+    // Sidecars written next to the temp mixed output when split is on.
+    // main.swift moves these next to the final recording on stop.
+    let meSidecarURL: URL
+    let themSidecarURL: URL
+    let speechSidecarURL: URL
+
+    // Speech-activity analysis. RMS is computed on float samples in [-1, 1];
+    // a window above this threshold counts as speech.
+    private let speechRMSThreshold: Float = 0.015
+    private let speechWindowSeconds = 0.5
+    private let speechMergeGapSeconds = 1.0
+
+    struct SidecarURLs {
+        let me: URL
+        let them: URL
+        let speech: URL
+    }
+
+    // The <stem>.me.wav / .them.wav / .speech.json naming, in one place so the
+    // init (which writes next to the temp output) and main.swift (which moves
+    // them next to the final output) can't drift. Mirrors the convention in
+    // src/transcribe/sidecar.ts; keep the two byte-identical.
+    static func sidecarURLs(forBase base: URL) -> SidecarURLs {
+        let dir = base.deletingLastPathComponent()
+        let stem = base.deletingPathExtension().lastPathComponent
+        return SidecarURLs(
+            me: dir.appendingPathComponent("\(stem).me.wav"),
+            them: dir.appendingPathComponent("\(stem).them.wav"),
+            speech: dir.appendingPathComponent("\(stem).speech.json")
+        )
+    }
+
+    init(outputURL: URL, split: Bool = false) throws {
         self.outputURL = outputURL
+        self.split = split
 
         let tempDir = NSTemporaryDirectory()
         let pid = ProcessInfo.processInfo.processIdentifier
         systemTempURL = URL(fileURLWithPath: tempDir).appendingPathComponent("sysrec-system-\(pid).wav")
         micTempURL = URL(fileURLWithPath: tempDir).appendingPathComponent("sysrec-mic-\(pid).wav")
 
-        for url in [outputURL, systemTempURL, micTempURL] {
+        let sidecars = AudioMixer.sidecarURLs(forBase: outputURL)
+        meSidecarURL = sidecars.me
+        themSidecarURL = sidecars.them
+        speechSidecarURL = sidecars.speech
+
+        for url in [outputURL, systemTempURL, micTempURL, meSidecarURL, themSidecarURL, speechSidecarURL] {
             if FileManager.default.fileExists(atPath: url.path) {
                 try FileManager.default.removeItem(at: url)
             }
@@ -212,10 +252,119 @@ final class AudioMixer: @unchecked Sendable {
 
         try? outputFile.write(from: mixBuffer)
 
+        if split {
+            writeSplitSidecars(systemBuffer: systemBuffer, micBuffer: micBuffer)
+        }
+
         // Cleanup temp files
         try? FileManager.default.removeItem(at: systemTempURL)
         try? FileManager.default.removeItem(at: micTempURL)
 
         return Double(maxFrames) / systemFormat.sampleRate
+    }
+
+    // MARK: - Split sidecars (me = mic, them = system)
+
+    // Emit the two streams as mono sidecars plus a speech-activity JSON.
+    // Downstream transcription runs with VAD off, and Whisper invents text on
+    // long silence. The mic stream is mostly silence, so the plugin drops
+    // transcript segments that fall outside these speech windows.
+    private func writeSplitSidecars(systemBuffer: AVAudioPCMBuffer, micBuffer: AVAudioPCMBuffer?) {
+        // them.wav + windows from the system stream; me.wav + windows from the
+        // mic stream when present. A single pass over each stream both downmixes
+        // to mono and derives the speech intervals.
+        let themIntervals = writeMonoSidecarWithSpeech(from: systemBuffer, to: themSidecarURL)
+        let meIntervals = micBuffer.map { writeMonoSidecarWithSpeech(from: $0, to: meSidecarURL) } ?? []
+
+        let speech: [String: Any] = ["me": meIntervals, "them": themIntervals]
+        if let data = try? JSONSerialization.data(withJSONObject: speech) {
+            try? data.write(to: speechSidecarURL)
+        }
+    }
+
+    // Downmix a stream to a mono Int16 wav and derive its speech intervals in one
+    // pass. The mono downmix is written in small chunks through a reusable buffer,
+    // so we never hold a full-length mono copy of a multi-hour recording in RAM.
+    // Speech detection reuses the same walk: RMS over all channels' samples in
+    // fixed 0.5 s windows, thresholded, then windows closer than the merge gap are
+    // joined into [startSec, endSec] intervals. Byte-for-byte the same result as
+    // the old two-pass code (same window size, threshold, and merge gap).
+    private func writeMonoSidecarWithSpeech(from source: AVAudioPCMBuffer, to url: URL) -> [[Double]] {
+        let frames = Int(source.frameLength)
+        guard frames > 0, let srcData = source.floatChannelData else { return [] }
+        let channels = Int(source.format.channelCount)
+        let sampleRate = source.format.sampleRate
+        let windowFrames = max(1, Int(speechWindowSeconds * sampleRate))
+
+        // A few thousand frames is enough to amortize the per-write overhead
+        // while keeping the transient buffer tiny.
+        let chunkFrames = 8192
+        let wavFormat = AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: sampleRate, channels: 1, interleaved: true)!
+        let outFile = try? AVAudioFile(forWriting: url, settings: wavFormat.settings)
+        let monoFormat = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: sampleRate, channels: 1, interleaved: false)
+        let chunkBuffer = monoFormat.flatMap {
+            AVAudioPCMBuffer(pcmFormat: $0, frameCapacity: AVAudioFrameCount(chunkFrames))
+        }
+
+        var speechWindows: [(start: Double, end: Double)] = []
+        // Accumulator for the window currently being filled, spanning all
+        // channels' samples exactly like the old per-window RMS.
+        var windowSumSquares: Double = 0
+        var windowCount = 0
+        var windowStartFrame = 0
+
+        func closeWindow(endFrame: Int) {
+            let rms = windowCount > 0 ? (windowSumSquares / Double(windowCount)).squareRoot() : 0
+            if rms > Double(speechRMSThreshold) {
+                speechWindows.append((Double(windowStartFrame) / sampleRate, Double(endFrame) / sampleRate))
+            }
+            windowSumSquares = 0
+            windowCount = 0
+        }
+
+        var frame = 0
+        while frame < frames {
+            let chunkEnd = min(frame + chunkFrames, frames)
+            let dst = chunkBuffer?.floatChannelData?[0]
+            var writeIdx = 0
+            for i in frame..<chunkEnd {
+                var sum: Float = 0
+                for ch in 0..<channels {
+                    let sample = srcData[ch][i]
+                    sum += sample
+                    let d = Double(sample)
+                    windowSumSquares += d * d
+                    windowCount += 1
+                }
+                dst?[writeIdx] = sum / Float(channels)
+                writeIdx += 1
+                // Close the window once it holds a full windowFrames worth of
+                // frames, then start the next one at the following frame.
+                if i + 1 - windowStartFrame >= windowFrames {
+                    closeWindow(endFrame: i + 1)
+                    windowStartFrame = i + 1
+                }
+            }
+            if let outFile = outFile, let chunkBuffer = chunkBuffer {
+                chunkBuffer.frameLength = AVAudioFrameCount(writeIdx)
+                try? outFile.write(from: chunkBuffer)
+            }
+            frame = chunkEnd
+        }
+        // Flush the trailing partial window (mirrors the old truncated last window).
+        if windowCount > 0 {
+            closeWindow(endFrame: frames)
+        }
+
+        var intervals: [[Double]] = []
+        for window in speechWindows {
+            if var last = intervals.last, window.start - last[1] < speechMergeGapSeconds {
+                last[1] = window.end
+                intervals[intervals.count - 1] = last
+            } else {
+                intervals.append([window.start, window.end])
+            }
+        }
+        return intervals
     }
 }

@@ -1,4 +1,10 @@
-import { App, Notice, PluginSettingTab, Setting } from "obsidian";
+import {
+	App,
+	DropdownComponent,
+	Notice,
+	PluginSettingTab,
+	Setting,
+} from "obsidian";
 import type SystemRecordingPlugin from "./main";
 import type { StoredTokens } from "./auth/googleOAuth";
 import {
@@ -7,8 +13,19 @@ import {
 } from "./notes/meetingNote";
 import { DEFAULT_ENRICH_PROMPT } from "./enrich/prompt";
 import { listModels } from "./enrich/models";
-import { inferSttApiType, STT_MODELS, type SttApiType } from "./transcribe/sttModel";
-import { t } from "./i18n";
+import {
+	inferSttApiType,
+	isTimestampCapableFamily,
+	STT_MODELS,
+	type SttApiType,
+} from "./transcribe/sttModel";
+import { probeKey, probeSttSupport } from "./transcribe/probe";
+import { listModels as listSttModels } from "./transcribe/models";
+import {
+	fetchModelCapabilities,
+	type ModelCapability,
+} from "./transcribe/capabilities";
+import { t, type Messages } from "./i18n";
 
 export interface SystemRecordingSettings {
 	recordingFolder: string;
@@ -23,6 +40,13 @@ export interface SystemRecordingSettings {
 	oneOnOneFolder: string;
 	/** Folder for unplanned (ad-hoc) meetings. */
 	adhocFolder: string;
+	/**
+	 * Subfolder (relative to a note's own folder) where that note's recordings
+	 * and their split sidecars are written, e.g. "Recordings" puts a note at
+	 * `Meetings/x.md`'s audio under `Meetings/Recordings/`. Empty = colocate the
+	 * audio beside the note (the pre-0.2 behavior).
+	 */
+	recordingSubfolder: string;
 	noteTitlePattern: string;
 	noteTemplate: string;
 	retentionDays: number;
@@ -56,6 +80,14 @@ export interface SystemRecordingSettings {
 	dictionaryCorrectionEnabled: boolean;
 	/** Custom dictionary, one `misheard => correct` rule per line. Applied for all transcription languages. */
 	dictionary: string;
+	/** Transcribe mic and system audio separately so each speaker's side can be told apart. Needs a timestamp-capable model. */
+	diarizationEnabled: boolean;
+	/** Whether the selected model can transcribe at all (from endpoint capabilities or a probe). null = not yet determined, or invalidated by a config change. */
+	sttTranscriptionSupported: boolean | null;
+	/** Whether the configured endpoint actually returns segment timestamps. null = never probed, or invalidated by a later config change. */
+	sttTimestampsSupported: boolean | null;
+	/** The `${apiBaseUrl}::${sttModel}` the two flags above were determined against; a mismatch means they're stale. */
+	sttTimestampsProbeKey: string;
 	// Enrichment.
 	enableEnrichment: boolean;
 	enrichModel: string;
@@ -69,13 +101,14 @@ export interface SystemRecordingSettings {
 export { STT_MODELS, inferSttApiType, type SttApiType };
 
 export const DEFAULT_SETTINGS: SystemRecordingSettings = {
-	recordingFolder: "recordings",
+	recordingFolder: "Recordings",
 	fileNameTemplate: "recording-YYYY-MM-DD-HHmmss",
 	oneOffFolderTemplate: "Meetings/{{year}}",
 	seriesFolderTemplate: "Meetings/{{series}}",
 	oneOnOneSeparately: true,
 	oneOnOneFolder: "Meetings/1-1s",
 	adhocFolder: "Meetings/Ad-hoc",
+	recordingSubfolder: "Recordings",
 	noteTitlePattern: DEFAULT_TITLE_PATTERN,
 	noteTemplate: DEFAULT_NOTE_TEMPLATE,
 	retentionDays: 90,
@@ -103,6 +136,10 @@ export const DEFAULT_SETTINGS: SystemRecordingSettings = {
 	postProcessingEnabled: false,
 	dictionaryCorrectionEnabled: false,
 	dictionary: "",
+	diarizationEnabled: true,
+	sttTranscriptionSupported: null,
+	sttTimestampsSupported: null,
+	sttTimestampsProbeKey: "",
 	enableEnrichment: true,
 	enrichModel: "gpt-4o",
 	enrichPrompt: DEFAULT_ENRICH_PROMPT,
@@ -175,6 +212,17 @@ export class SystemRecordingSettingTab extends PluginSettingTab {
     plugin: SystemRecordingPlugin;
     /** Model ids fetched from the endpoint (populated by "Test connection"), shared by transcription + enrichment. */
     private models: string[] = [];
+    /** Per-model capabilities from the endpoint (LiteLLM), or null when the endpoint doesn't expose them (plain OpenAI). Drives the transcription-model filter. */
+    private capabilities: Map<string, ModelCapability> | null = null;
+    /** The `${baseUrl}::${model}` key currently being auto-assessed, so the badges can show "checking…". */
+    private probingKey: string | null = null;
+    /** Endpoint+model keys already auto-assessed this session, so re-renders don't re-fire the probe (even after an "unknown" result). */
+    private probedKeys = new Set<string>();
+    /** Description elements for the two STT support badges, updated in place so selecting a model doesn't re-render (and scroll-jump) the whole tab. */
+    private sttTranscriptionBadgeEl: HTMLElement | null = null;
+    private sttTimestampBadgeEl: HTMLElement | null = null;
+    /** The engine-family dropdown, so a model change can update its value in place. */
+    private sttEngineDropdown: DropdownComponent | null = null;
 
     constructor(app: App, plugin: SystemRecordingPlugin) {
         super(app, plugin);
@@ -185,6 +233,12 @@ export class SystemRecordingSettingTab extends PluginSettingTab {
         const { containerEl } = this;
         const s = t();
         containerEl.empty();
+        // Opening (or re-rendering) the tab is a fresh chance to auto-probe:
+        // clear the per-session "already probed" guard so a verdict invalidated
+        // at runtime (e.g. diarization found no timestamps) is re-checked here
+        // instead of being stuck at "not checked yet" until a manual Recheck.
+        // The guard still prevents repeated probes from rapid in-tab edits.
+        this.probedKeys.clear();
 
 		new Setting(containerEl).setName(s.settings.calendarHeading).setHeading();
 
@@ -401,6 +455,11 @@ export class SystemRecordingSettingTab extends PluginSettingTab {
 					.onChange(async (value) => {
 						this.plugin.settings.apiBaseUrl = value.trim();
 						await this.plugin.saveSettings();
+						// The stored verdict is keyed on the old base URL, so the
+						// badges now read "not checked yet"; repaint them and let
+						// a re-probe run on the next model change / tab reopen.
+						this.probedKeys.clear();
+						this.refreshSttBadges();
 					})
 			);
 
@@ -413,7 +472,14 @@ export class SystemRecordingSettingTab extends PluginSettingTab {
 					.setValue(this.plugin.settings.apiKey)
 					.onChange(async (value) => {
 						this.plugin.settings.apiKey = value.trim();
+						// probeKey ignores the key, so a stored verdict would
+						// otherwise stay falsely "fresh" after a key change.
+						// Reset it so transcription/timestamp support is
+						// re-probed against the new credential.
+						this.plugin.settings.sttTimestampsProbeKey = "";
 						await this.plugin.saveSettings();
+						this.probedKeys.clear();
+						this.refreshSttBadges();
 					});
 			})
 			.addButton((button) =>
@@ -429,6 +495,14 @@ export class SystemRecordingSettingTab extends PluginSettingTab {
 						button.setDisabled(true);
 						try {
 							this.models = await listModels(apiBaseUrl, apiKey);
+							// Endpoints that expose per-model capabilities
+							// (LiteLLM) let us filter the STT picker to real
+							// transcription models; null just means we fall back
+							// to probing whatever model is picked.
+							this.capabilities = await fetchModelCapabilities(
+								apiBaseUrl,
+								apiKey
+							);
 							new Notice(
 								this.models.length === 0
 									? s.settings.testConnection.empty
@@ -436,7 +510,10 @@ export class SystemRecordingSettingTab extends PluginSettingTab {
 											this.models.length
 										)
 							);
-							// Re-render so both model dropdowns pick up the list.
+							// Transcription/timestamp support is assessed
+							// automatically when the model changes (and on open),
+							// not here — this button only verifies the endpoint
+							// and loads the model list + capabilities.
 							this.display();
 						} catch (e) {
 							new Notice(
@@ -457,39 +534,103 @@ export class SystemRecordingSettingTab extends PluginSettingTab {
 			.setName(s.settings.transcriptionHeading)
 			.setHeading();
 
-		// Model id sent on the wire (dropdown once models are loaded, else free text).
+		// Model id sent on the wire (dropdown once models are loaded, else free
+		// text). "Load models" fetches just the transcription endpoint's list,
+		// independent of the shared "Test connection" above.
+		const sttModelSetting = new Setting(containerEl)
+			.setName(s.settings.sttModel.name)
+			.setDesc(s.settings.sttModel.desc)
+			.addButton((button) =>
+				button
+					.setButtonText(s.settings.loadModels.button)
+					.onClick(async () => {
+						const { apiBaseUrl, apiKey } = this.plugin.settings;
+						button.setDisabled(true);
+						const found = await listSttModels({
+							baseUrl: apiBaseUrl,
+							apiKey,
+						});
+						// Refresh capabilities too so the picker can filter to
+						// real transcription models when the endpoint knows.
+						this.capabilities = await fetchModelCapabilities(
+							apiBaseUrl,
+							apiKey
+						);
+						button.setDisabled(false);
+						// A null or empty result just means the lookup didn't
+						// pan out — keep the free-text field, no error noise.
+						if (found && found.length > 0) {
+							this.models = found;
+							new Notice(
+								s.settings.loadModels.success(found.length)
+							);
+						}
+						this.display();
+					})
+			);
 		this.addModelPicker(
-			new Setting(containerEl)
-				.setName(s.settings.sttModel.name)
-				.setDesc(s.settings.sttModel.desc),
+			sttModelSetting,
 			this.plugin.settings.sttModel,
 			async (value) => {
 				this.plugin.settings.sttModel = value;
 				// Keep the engine family in sync with the picked model.
 				this.plugin.settings.sttApiType = inferSttApiType(value);
 				await this.plugin.saveSettings();
-				this.display();
-			}
+				// Update in place instead of re-rendering the whole tab (which
+				// would scroll-jump back to the top): sync the engine dropdown,
+				// refresh the badges, and kick off an assessment of the new
+				// model.
+				this.sttEngineDropdown?.setValue(this.engineDropdownValue());
+				this.refreshSttBadges();
+				this.maybeAssessSttModel();
+			},
+			// When the endpoint reports capabilities (LiteLLM), only offer
+			// models it says can transcribe. Without that info (plain OpenAI),
+			// no filter — the probe below determines transcription support.
+			this.capabilities
+				? (id) => this.capabilities?.get(id)?.transcription === true
+				: undefined
 		);
 
+		const transcriptionBadge = new Setting(containerEl)
+			.setName(s.settings.transcriptionBadge.name)
+			.setDesc(this.transcriptionBadgeText(s))
+			.addButton((button) =>
+				button
+					.setButtonText(s.settings.recheckSupport.button)
+					.setTooltip(s.settings.recheckSupport.tooltip)
+					.onClick(() => this.recheckSttSupport())
+			);
+		this.sttTranscriptionBadgeEl = transcriptionBadge.descEl;
+		const timestampBadge = new Setting(containerEl)
+			.setName(s.settings.timestampBadge.name)
+			.setDesc(this.timestampBadgeText(s));
+		this.sttTimestampBadgeEl = timestampBadge.descEl;
+		// Assess transcription + timestamp support for the current model (fires
+		// once per endpoint+model per session; no-op when the endpoint isn't
+		// set or a fresh verdict is already stored). The "Recheck" button above
+		// force-reruns it (and reports the outcome) when a probe came back
+		// inconclusive.
+		this.maybeAssessSttModel();
+
+		// Engine family = request routing/chunking. It's auto-set from the model
+		// above (see the picker's onChange), so this is an advanced override,
+		// only needed when a gateway's opaque model name hides which engine it
+		// really is. Word timestamps are handled automatically by the probe, so
+		// there's no separate "Whisper (word timestamps)" choice: the Whisper
+		// engine asks for timestamps and silently falls back when unsupported.
 		new Setting(containerEl)
 			.setName(s.settings.sttApiType.name)
 			.setDesc(s.settings.sttApiType.desc)
 			.addDropdown((dd) => {
-				dd.addOption(
-					"gpt-4o-transcribe",
-					s.settings.sttApiType.gpt4o
-				);
+				this.sttEngineDropdown = dd;
+				dd.addOption("gpt-4o-transcribe", s.settings.sttApiType.gpt4o);
 				dd.addOption(
 					"gpt-4o-mini-transcribe",
 					s.settings.sttApiType.gpt4oMini
 				);
-				dd.addOption("whisper-1", s.settings.sttApiType.whisper);
-				dd.addOption(
-					"whisper-1-ts",
-					s.settings.sttApiType.whisperTs
-				);
-				dd.setValue(this.plugin.settings.sttApiType).onChange(
+				dd.addOption("whisper-1-ts", s.settings.sttApiType.whisper);
+				dd.setValue(this.engineDropdownValue()).onChange(
 					async (value) => {
 						this.plugin.settings.sttApiType = STT_MODELS.includes(
 							value as SttApiType
@@ -497,9 +638,25 @@ export class SystemRecordingSettingTab extends PluginSettingTab {
 							? (value as SttApiType)
 							: "gpt-4o-transcribe";
 						await this.plugin.saveSettings();
+						// Update badges in place (no full re-render / scroll
+						// jump) and re-assess against the new engine family.
+						this.refreshSttBadges();
+						this.maybeAssessSttModel();
 					}
 				);
 			});
+
+		new Setting(containerEl)
+			.setName(s.settings.diarization.name)
+			.setDesc(s.settings.diarization.desc)
+			.addToggle((toggle) =>
+				toggle
+					.setValue(this.plugin.settings.diarizationEnabled)
+					.onChange(async (value) => {
+						this.plugin.settings.diarizationEnabled = value;
+						await this.plugin.saveSettings();
+					})
+			);
 
 		new Setting(containerEl)
 			.setName(s.settings.sttLanguage.name)
@@ -746,6 +903,19 @@ export class SystemRecordingSettingTab extends PluginSettingTab {
 		);
 
 		new Setting(containerEl)
+			.setName(s.settings.recordingSubfolder.name)
+			.setDesc(s.settings.recordingSubfolder.desc)
+			.addText((text) =>
+				text
+					.setPlaceholder(DEFAULT_SETTINGS.recordingSubfolder)
+					.setValue(this.plugin.settings.recordingSubfolder)
+					.onChange(async (value) => {
+						this.plugin.settings.recordingSubfolder = value;
+						await this.plugin.saveSettings();
+					})
+			);
+
+		new Setting(containerEl)
 			.setName(s.settings.noteTitlePattern.name)
 			.setDesc(s.settings.noteTitlePattern.desc)
 			.addText((text) =>
@@ -791,6 +961,229 @@ export class SystemRecordingSettingTab extends PluginSettingTab {
     }
 
     /**
+     * Badge text for whether the selected model can transcribe. "checking…"
+     * while the assessment is in flight, then supported/not supported once a
+     * verdict is stored against the current endpoint + model (a since-changed
+     * URL or model invalidates it, falling back to the not-checked text).
+     */
+    private transcriptionBadgeText(s: Messages): string {
+        const { apiBaseUrl, sttModel, sttTranscriptionSupported, sttTimestampsProbeKey } =
+            this.plugin.settings;
+        const currentKey = probeKey(apiBaseUrl, sttModel);
+        if (this.probingKey === currentKey) {
+            return s.settings.transcriptionBadge.checking;
+        }
+        if (sttTranscriptionSupported === null || sttTimestampsProbeKey !== currentKey) {
+            return s.settings.transcriptionBadge.unknown;
+        }
+        return sttTranscriptionSupported
+            ? s.settings.transcriptionBadge.supported
+            : s.settings.transcriptionBadge.notSupported;
+    }
+
+    /**
+     * Badge text for the model's segment-timestamp support. Only the Whisper
+     * timestamp family asks the backend for segments at all, so any other
+     * family reads as "not applicable". Within that family: "checking…" while
+     * the assessment is in flight, then detected/not detected once a verdict is
+     * stored against the current endpoint + model.
+     */
+    private timestampBadgeText(s: Messages): string {
+        const {
+            apiBaseUrl,
+            sttModel,
+            sttApiType,
+            sttTimestampsSupported,
+            sttTimestampsProbeKey,
+        } = this.plugin.settings;
+        if (!isTimestampCapableFamily(sttApiType)) {
+            return s.settings.timestampBadge.notApplicable;
+        }
+        const currentKey = probeKey(apiBaseUrl, sttModel);
+        if (this.probingKey === currentKey) {
+            return s.settings.timestampBadge.checking;
+        }
+        if (sttTimestampsSupported === null || sttTimestampsProbeKey !== currentKey) {
+            return s.settings.timestampBadge.unknown;
+        }
+        return sttTimestampsSupported
+            ? s.settings.timestampBadge.detected
+            : s.settings.timestampBadge.notDetected;
+    }
+
+    /** The value the engine dropdown should show: the retired no-timestamps "whisper-1" maps onto the single Whisper option. */
+    private engineDropdownValue(): SttApiType {
+        return this.plugin.settings.sttApiType === "whisper-1"
+            ? "whisper-1-ts"
+            : this.plugin.settings.sttApiType;
+    }
+
+    /** Updates the two STT support badges in place (no full re-render, so scroll position is kept). No-op before the badges have been rendered. */
+    private refreshSttBadges(): void {
+        const s = t();
+        this.sttTranscriptionBadgeEl?.setText(this.transcriptionBadgeText(s));
+        this.sttTimestampBadgeEl?.setText(this.timestampBadgeText(s));
+    }
+
+    /** Force-reruns the assessment for the current model (used by the "Recheck" button), clearing the once-per-session guard and reporting the outcome. */
+    private recheckSttSupport(): void {
+        const { apiBaseUrl, sttModel } = this.plugin.settings;
+        if (!apiBaseUrl || !sttModel) {
+            new Notice(t().settings.testConnection.noBaseUrl);
+            return;
+        }
+        this.probedKeys.delete(probeKey(apiBaseUrl, sttModel));
+        this.maybeAssessSttModel(true);
+    }
+
+    /**
+     * Fire-and-forget assessment of the current transcription model, triggered
+     * on render (so it runs on open and after a model change) and by the
+     * "Recheck" button. Transcription support comes from the endpoint's
+     * declared capabilities when available (LiteLLM), otherwise from a probe of
+     * `/audio/transcriptions`; timestamp support is probed only for the Whisper
+     * family (the only one that asks for segments). It runs at most once per
+     * endpoint+model key per session (unless {@link recheckSttSupport} clears
+     * the guard) so re-renders — and an "unknown" result that leaves stored
+     * verdicts untouched — can't spin it into a loop. Verdicts are persisted and
+     * the badges refreshed in place. When `notify` is set (manual recheck), the
+     * outcome — including *why* an inconclusive probe failed — is surfaced as a
+     * Notice.
+     */
+    private maybeAssessSttModel(notify = false): void {
+        const { apiBaseUrl, apiKey, sttModel, sttApiType } =
+            this.plugin.settings;
+        if (!apiBaseUrl || !sttModel) return;
+        const key = probeKey(apiBaseUrl, sttModel);
+        const wantsTimestamps = isTimestampCapableFamily(sttApiType);
+        // A fresh, complete verdict is already stored for this exact pair.
+        const haveTranscription =
+            this.plugin.settings.sttTimestampsProbeKey === key &&
+            this.plugin.settings.sttTranscriptionSupported !== null;
+        const haveTimestamps =
+            !wantsTimestamps ||
+            (this.plugin.settings.sttTimestampsProbeKey === key &&
+                this.plugin.settings.sttTimestampsSupported !== null);
+        if (haveTranscription && haveTimestamps && !notify) return;
+        if (this.probedKeys.has(key) && !notify) return;
+        this.probedKeys.add(key);
+        this.probingKey = key;
+        this.refreshSttBadges();
+        void (async () => {
+            let detail = "";
+            try {
+                const declared = this.capabilities?.get(sttModel)?.transcription;
+                let transcription: boolean | null = declared ?? null;
+                let timestamps: boolean | null = null;
+                // Skip the probe entirely if capabilities say this model can't
+                // transcribe; otherwise probe (for the transcription verdict
+                // when the endpoint didn't declare one, and/or for timestamps).
+                if (declared === false) {
+                    timestamps = false;
+                } else if (declared === undefined || wantsTimestamps) {
+                    const support = await probeSttSupport({
+                        baseUrl: apiBaseUrl,
+                        apiKey,
+                        wireModel: sttModel,
+                        withTimestamps: wantsTimestamps,
+                    });
+                    detail = support.detail;
+                    let transcriptionVerdict = support.transcription;
+                    let timestampVerdict = support.timestamps;
+                    // A verbose_json request that was *definitively rejected*
+                    // (a 4xx model-rejected status) is ambiguous: the model may
+                    // transcribe fine but reject the timestamp params. Re-probe
+                    // with plain json so we don't mislabel a good Whisper model
+                    // as "can't transcribe" just because it won't emit segments.
+                    // Only on a hard `unsupported` — an `unknown` verbose result
+                    // (5xx/429/network) is transient, and reprobing then would
+                    // wrongly persist "timestamps unsupported" off a flaky call.
+                    if (
+                        wantsTimestamps &&
+                        transcriptionVerdict === "unsupported"
+                    ) {
+                        const plain = await probeSttSupport({
+                            baseUrl: apiBaseUrl,
+                            apiKey,
+                            wireModel: sttModel,
+                            withTimestamps: false,
+                        });
+                        detail = plain.detail;
+                        transcriptionVerdict = plain.transcription;
+                        // If plain transcription works, the earlier rejection
+                        // was the timestamps; otherwise it's genuinely not a
+                        // transcription model (leave timestamps inconclusive).
+                        timestampVerdict =
+                            plain.transcription === "supported"
+                                ? "unsupported"
+                                : "unknown";
+                    }
+                    if (declared === undefined) {
+                        transcription =
+                            transcriptionVerdict === "supported"
+                                ? true
+                                : transcriptionVerdict === "unsupported"
+                                    ? false
+                                    : null;
+                    }
+                    if (wantsTimestamps && timestampVerdict !== "unknown") {
+                        timestamps = timestampVerdict === "supported";
+                    }
+                }
+                let changed = false;
+                if (transcription !== null) {
+                    this.plugin.settings.sttTranscriptionSupported =
+                        transcription;
+                    changed = true;
+                }
+                if (timestamps !== null) {
+                    this.plugin.settings.sttTimestampsSupported = timestamps;
+                    changed = true;
+                }
+                if (changed) {
+                    this.plugin.settings.sttTimestampsProbeKey = key;
+                    await this.plugin.saveSettings();
+                }
+                if (notify) {
+                    new Notice(
+                        this.assessmentNotice(
+                            transcription,
+                            timestamps,
+                            wantsTimestamps,
+                            detail
+                        )
+                    );
+                }
+            } finally {
+                if (this.probingKey === key) this.probingKey = null;
+                this.refreshSttBadges();
+            }
+        })();
+    }
+
+    /**
+     * Builds the Notice text for a manual recheck from *this run's* verdicts
+     * (not the stored flags, which can still hold a previous model's result when
+     * the current probe was inconclusive). An inconclusive transcription verdict
+     * is reported with its HTTP status / error so the user can see why.
+     */
+    private assessmentNotice(
+        transcription: boolean | null,
+        timestamps: boolean | null,
+        wantsTimestamps: boolean,
+        detail: string
+    ): string {
+        const s = t().settings.recheckSupport;
+        if (transcription === false) return s.notTranscription;
+        if (transcription === null) return s.inconclusive(detail);
+        if (!wantsTimestamps) return s.transcribes;
+        if (timestamps === true) return s.timestampsYes;
+        if (timestamps === false) return s.timestampsNo;
+        // Transcription works but the timestamp verdict was inconclusive.
+        return s.transcribes;
+    }
+
+    /**
      * Text field for one of the folder/template settings (one-off, series,
      * ad-hoc, 1:1), which all share the same shape: a placeholder of the
      * default value, and an empty/blank edit reverting to that default rather
@@ -817,16 +1210,20 @@ export class SystemRecordingSettingTab extends PluginSettingTab {
      * of the models fetched from the endpoint (via "Test connection"), keeping
      * the current value selectable even if the endpoint didn't list it. Falls
      * back to a free-text field when no models have been loaded yet so the user
-     * can still type a model id offline.
+     * can still type a model id offline. An optional `filter` narrows the
+     * offered options (e.g. transcription-only for the STT picker); the current
+     * value is always kept selectable even if it wouldn't pass the filter.
      */
     private addModelPicker(
         setting: Setting,
         current: string,
-        onChange: (value: string) => Promise<void>
+        onChange: (value: string) => Promise<void>,
+        filter?: (modelId: string) => boolean
     ): void {
-        if (this.models.length > 0) {
+        const offered = filter ? this.models.filter(filter) : this.models;
+        if (offered.length > 0 || (current && this.models.length > 0)) {
             const options: Record<string, string> = {};
-            for (const m of this.models) options[m] = m;
+            for (const m of offered) options[m] = m;
             if (current && !options[current]) options[current] = current;
             setting.addDropdown((dd) =>
                 dd

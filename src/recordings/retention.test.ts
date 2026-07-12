@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { findExpiredRecordings, isAudioExt } from "./retention";
+import { findExpiredRecordings, isAudioExt, isSpeechSidecar } from "./retention";
 
 const DAY = 24 * 60 * 60 * 1000;
 const NOW = 1_000 * DAY; // arbitrary fixed "now"
@@ -9,6 +9,15 @@ describe("isAudioExt", () => {
 		expect(isAudioExt("wav")).toBe(true);
 		expect(isAudioExt("M4A")).toBe(true);
 		expect(isAudioExt("md")).toBe(false);
+	});
+});
+
+describe("isSpeechSidecar", () => {
+	it("matches the speech-window sidecar by name, not extension", () => {
+		expect(isSpeechSidecar("Meetings/a.speech.json")).toBe(true);
+		expect(isSpeechSidecar("Meetings/A.SPEECH.JSON")).toBe(true);
+		expect(isSpeechSidecar("Meetings/a.json")).toBe(false);
+		expect(isSpeechSidecar("Meetings/a.wav")).toBe(false);
 	});
 });
 
@@ -30,6 +39,23 @@ describe("findExpiredRecordings", () => {
 		expect(expired.map((f) => f.path)).toEqual([
 			"Meetings/a.wav",
 			"recordings/old.m4a",
+		]);
+	});
+
+	it("sweeps old speech.json sidecars alongside the audio", () => {
+		const withSidecars = [
+			{ path: "Meetings/a.speech.json", ext: "json", mtime: NOW - 40 * DAY },
+			{ path: "Meetings/recent.speech.json", ext: "json", mtime: NOW - 5 * DAY },
+			// A plain JSON that isn't a speech sidecar stays untouched.
+			{ path: "Meetings/notes.json", ext: "json", mtime: NOW - 40 * DAY },
+		];
+		const expired = findExpiredRecordings(withSidecars, {
+			folders: ["Meetings"],
+			retentionDays: 30,
+			now: NOW,
+		});
+		expect(expired.map((f) => f.path)).toEqual([
+			"Meetings/a.speech.json",
 		]);
 	});
 

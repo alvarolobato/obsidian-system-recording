@@ -1,5 +1,27 @@
 import { describe, expect, it } from "vitest";
-import { inferSttApiType, STT_MODELS } from "./sttModel";
+import {
+	canSeparateSpeakers,
+	inferSttApiType,
+	isTimestampCapableFamily,
+	STT_MODELS,
+	type DiarizationGateSettings,
+} from "./sttModel";
+
+describe("isTimestampCapableFamily", () => {
+	it("is true only for the timestamped whisper family", () => {
+		expect(isTimestampCapableFamily("whisper-1-ts")).toBe(true);
+	});
+
+	it("is false for every other family", () => {
+		for (const family of [
+			"whisper-1",
+			"gpt-4o-transcribe",
+			"gpt-4o-mini-transcribe",
+		] as const) {
+			expect(isTimestampCapableFamily(family)).toBe(false);
+		}
+	});
+});
 
 describe("inferSttApiType", () => {
 	it("maps whisper names (incl. gateway ids) to the timestamped whisper family", () => {
@@ -31,5 +53,63 @@ describe("inferSttApiType", () => {
 				inferSttApiType(id)
 			);
 		}
+	});
+});
+
+describe("canSeparateSpeakers", () => {
+	const KEY = "https://gw.example.com/v1::whisper-1";
+
+	const base: DiarizationGateSettings = {
+		diarizationEnabled: true,
+		sttApiType: "whisper-1-ts",
+		sttTimestampsSupported: true,
+		sttTimestampsProbeKey: KEY,
+	};
+
+	it("is true when every condition holds", () => {
+		expect(canSeparateSpeakers(base, KEY)).toBe(true);
+	});
+
+	it("is false when diarization is turned off", () => {
+		expect(
+			canSeparateSpeakers({ ...base, diarizationEnabled: false }, KEY)
+		).toBe(false);
+	});
+
+	it("is false for any family other than whisper-1-ts", () => {
+		for (const sttApiType of [
+			"whisper-1",
+			"gpt-4o-transcribe",
+			"gpt-4o-mini-transcribe",
+		] as const) {
+			expect(canSeparateSpeakers({ ...base, sttApiType }, KEY)).toBe(false);
+		}
+	});
+
+	it("is false when timestamps were never probed", () => {
+		expect(
+			canSeparateSpeakers(
+				{ ...base, sttTimestampsSupported: null },
+				KEY
+			)
+		).toBe(false);
+	});
+
+	it("is false when the probe came back negative", () => {
+		expect(
+			canSeparateSpeakers(
+				{ ...base, sttTimestampsSupported: false },
+				KEY
+			)
+		).toBe(false);
+	});
+
+	it("is false when the stored probe key is stale (endpoint or model changed since)", () => {
+		expect(canSeparateSpeakers(base, "https://gw.example.com/v1::whisper-2")).toBe(
+			false
+		);
+		expect(canSeparateSpeakers({ ...base, sttTimestampsProbeKey: "" }, KEY)).toBe(
+			false
+		);
 	});
 });

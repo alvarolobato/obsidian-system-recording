@@ -57,8 +57,18 @@ import { isPartialTranscript } from "./transcribe/partial";
 import {
     initTranscribeEngine,
     transcribeAudio,
+    transcribeDiarized,
     type TranscribeConfig,
 } from "./transcribe/TranscriptionService";
+import { canSeparateSpeakers } from "./transcribe/sttModel";
+import { probeKey } from "./transcribe/probe";
+import {
+    baseRecordingPathOf,
+    isSidecarPath,
+    parseSpeechWindows,
+    sidecarPathsFor,
+} from "./transcribe/sidecar";
+import type { SpeechWindows } from "./transcribe/diarize";
 import { parseDictionary } from "./transcribe/dictionary";
 import type { TranscriptionModel } from "./transcribe/vendor/ApiSettings";
 import {
@@ -91,6 +101,7 @@ import { registerIcons, RECORD_ICON } from "./ui/icons";
 import { notifyOs, requestNotificationPermission } from "./ui/osNotification";
 import { MeetingDetector } from "./detect/meetingDetector";
 import { googleMeetActive, zoomInMeeting } from "./detect/probe";
+import { execFile } from "child_process";
 
 export default class SystemRecordingPlugin extends Plugin {
     settings: SystemRecordingSettings;
@@ -360,6 +371,14 @@ export default class SystemRecordingPlugin extends Plugin {
         // Guard against corrupt/hand-edited data selecting an unknown engine
         // family, which would silently fall through to the GPT-4o path.
         this.settings.sttApiType = clampApiType(this.settings.sttApiType);
+        // The UI no longer exposes a separate no-timestamps Whisper: collapse
+        // the retired "whisper-1" family into the timestamp-intent one. Real
+        // transcriptions downgrade back to plain whisper-1 on the wire when the
+        // endpoint doesn't actually return timestamps (see resolveEngineFamily),
+        // so nothing breaks for backends that reject verbose_json.
+        if (this.settings.sttApiType === "whisper-1") {
+            this.settings.sttApiType = "whisper-1-ts";
+        }
         // Keep the OAuth refresh token and client secret out of the synced/
         // committed data.json: load them from per-vault localStorage instead,
         // migrating any legacy plaintext copies that still live in data.json.
@@ -588,17 +607,28 @@ export default class SystemRecordingPlugin extends Plugin {
 
             const adapter = this.app.vault.adapter;
 
-            // Meeting recordings live beside their note (same folder + basename);
-            // ad-hoc recordings fall back to the template in the recordings folder.
+            // Meeting recordings go under a "Recordings" subfolder of the note's
+            // own folder (configurable; empty = colocate beside the note). Ad-hoc
+            // recordings with no note fall back to the flat recordings folder.
             let relativePath: string;
             if (meeting) {
                 // A note at the vault root has folder "" (nothing to create).
+                // Ensure the note's folder before its (nested) Recordings child,
+                // so the subfolder mkdir can't fail on a missing parent.
                 if (meeting.folder && !(await adapter.exists(meeting.folder))) {
                     await adapter.mkdir(meeting.folder);
                 }
+                const recFolder = this.recordingFolderFor(meeting.folder);
+                if (
+                    recFolder &&
+                    recFolder !== meeting.folder &&
+                    !(await adapter.exists(recFolder))
+                ) {
+                    await adapter.mkdir(recFolder);
+                }
                 relativePath = await this.uniqueWavPath(
                     adapter,
-                    meeting.folder,
+                    recFolder,
                     meeting.basename
                 );
                 this.currentMeetingNotePath = meeting.notePath;
@@ -621,8 +651,16 @@ export default class SystemRecordingPlugin extends Plugin {
                 adapter instanceof FileSystemAdapter ? adapter.getBasePath() : "";
             const absolutePath = path.join(vaultBasePath, relativePath);
 
-            // Start recording
-            this.recorder.start(binaryPath, absolutePath);
+            // Start recording. --split writes the per-speaker sidecars only when
+            // separation is actually usable, so we don't pay for them otherwise.
+            // Re-arm the screen-recording-settings opener for this attempt: a
+            // permission failure surfaces asynchronously via onError, and each
+            // new recording attempt is a deliberate user action that should get
+            // one fresh chance to deep-link to System Settings.
+            this.screenSettingsOpened = false;
+            this.recorder.start(binaryPath, absolutePath, {
+                split: this.shouldSeparateSpeakers(),
+            });
             this.recordingStartTime = Date.now();
             this.startDurationTimer();
             this.updateRibbonIcon(true);
@@ -899,6 +937,9 @@ export default class SystemRecordingPlugin extends Plugin {
 				basename: ref.basename,
 				notePath: ref.notePath,
 				eventId: info.id,
+				// Track the live TFile so a rename mid-recording still links the
+				// WAV correctly (matches the ad-hoc path).
+				note: ref.file,
 			});
 		} catch (e) {
 			new Notice(t().notices.recordingError(e instanceof Error ? e.message : String(e)));
@@ -1309,15 +1350,45 @@ export default class SystemRecordingPlugin extends Plugin {
         await this.launchTranscriber(m.recording);
     }
 
+    /**
+     * True when me-vs-them speaker separation should run: the user enabled it
+     * and the current endpoint + model has been probed and confirmed to return
+     * timestamps. Gates both the split at record time and the diarized pass at
+     * transcribe time.
+     */
+    private shouldSeparateSpeakers(): boolean {
+        return canSeparateSpeakers(
+            this.settings,
+            probeKey(this.settings.apiBaseUrl, this.settings.sttModel)
+        );
+    }
+
+    /**
+     * The engine family to send on the wire. The timestamp-intent Whisper
+     * (`whisper-1-ts`) asks for `verbose_json`, which backends that don't emit
+     * timestamps reject outright — so downgrade it to plain `whisper-1` unless
+     * a fresh probe confirmed this endpoint + model actually returns segments.
+     * Other families pass through unchanged.
+     */
+    private resolveEngineFamily(): SttApiType {
+        const s = this.settings;
+        if (s.sttApiType !== "whisper-1-ts") return s.sttApiType;
+        const key = probeKey(s.apiBaseUrl, s.sttModel);
+        const timestampsConfirmed =
+            s.sttTimestampsProbeKey === key && s.sttTimestampsSupported === true;
+        return timestampsConfirmed ? "whisper-1-ts" : "whisper-1";
+    }
+
     /** Maps plugin settings onto the vendored transcription engine's config. */
     private buildTranscribeConfig(): TranscribeConfig {
         const s = this.settings;
         return {
             baseUrl: s.apiBaseUrl,
             apiKey: s.apiKey,
-            // sttApiType selects the engine family (routing/chunking/timestamps);
-            // sttModel is the actual name sent on the wire (may be a gateway id).
-            model: s.sttApiType as TranscriptionModel,
+            // The engine family selects routing/chunking/timestamps; sttModel is
+            // the actual name sent on the wire (may be a gateway id). Whisper
+            // downgrades to no-timestamps when the endpoint can't emit them.
+            model: this.resolveEngineFamily() as TranscriptionModel,
             modelOverride: s.sttModel,
             chatModel: s.enrichModel,
             language: s.sttLanguage || "auto",
@@ -1326,6 +1397,70 @@ export default class SystemRecordingPlugin extends Plugin {
             userDictionaries: parseDictionary(s.dictionary),
             debugMode: false,
         };
+    }
+
+    /**
+     * Runs the speaker-separated pass when the split sidecars are present and
+     * the endpoint is known to emit timestamps. Returns the diarized transcript,
+     * or null when separation doesn't apply (feature off, or no sidecars on
+     * disk) or the endpoint returned no segments this pass and we fell back to
+     * the mixed file. On that fallback it also invalidates the cached probe so
+     * future meetings don't keep paying for the extra passes.
+     */
+    private async tryDiarizedTranscribe(
+        recording: TFile
+    ): Promise<string | null> {
+        if (!this.shouldSeparateSpeakers()) return null;
+        // Discover the split sidecars by naming convention so separation works
+        // for both the auto-transcribe after stop and a manual re-run on an old
+        // recording. The helper writes them straight to disk, so check the
+        // adapter (which bypasses the vault-index lag) before waiting on the
+        // TFile: a recording with no sidecars must not stall the retry loop.
+        const sidecars = sidecarPathsFor(recording.path);
+        const meFile = await this.resolveExistingFile(sidecars.me);
+        const themFile = await this.resolveExistingFile(sidecars.them);
+        if (!meFile || !themFile) return null;
+
+        // speech.json is optional: a missing or malformed sidecar yields
+        // undefined windows, and the merge then keeps every segment.
+        let windows: SpeechWindows | undefined;
+        const speech = await this.resolveExistingFile(sidecars.speech);
+        if (speech) {
+            windows = parseSpeechWindows(await this.app.vault.read(speech));
+        }
+        const result = await transcribeDiarized(
+            this.app,
+            meFile,
+            themFile,
+            this.buildTranscribeConfig(),
+            windows
+        );
+        if (result.diarized) return result.text;
+
+        // The endpoint didn't return timestamps this pass (a misconfiguration
+        // slipping past the probe). Invalidate the cached probe so we stop
+        // paying for three passes every meeting, and tell the user how to
+        // re-check. The mixed pass runs back in launchTranscriber.
+        console.warn(
+            "[Meeting Copilot] diarization returned no segments; using mixed audio"
+        );
+        this.settings.sttTimestampsSupported = null;
+        await this.saveSettings();
+        new Notice(t().notices.diarizationNoTimestamps);
+        return null;
+    }
+
+    /**
+     * Resolves a vault path to a TFile only when the file actually exists on
+     * disk. Checks the vault adapter first (no index lag) so a sidecar that was
+     * never written returns immediately, then reuses the retry helper so a
+     * just-written file gets time to land in the vault index.
+     */
+    private async resolveExistingFile(
+        vaultPath: string
+    ): Promise<TFile | null> {
+        if (!(await this.app.vault.adapter.exists(vaultPath))) return null;
+        return this.resolveFileWithRetry(vaultPath);
     }
 
     /**
@@ -1347,11 +1482,19 @@ export default class SystemRecordingPlugin extends Plugin {
         this.transcribingPaths.add(recording.path);
         this.setActionStatus(t().statusBar.transcribing, "busy");
         try {
-            const text = await transcribeAudio(
-                this.app,
-                recording,
-                this.buildTranscribeConfig()
-            );
+            // Try the speaker-separated pass; a null means it didn't apply or
+            // fell back, in which case we transcribe the mixed wav (which always
+            // exists) with a single call.
+            const diarizedText = await this.tryDiarizedTranscribe(recording);
+            const diarized = diarizedText !== null;
+            const text =
+                diarizedText ??
+                (await transcribeAudio(
+                    this.app,
+                    recording,
+                    this.buildTranscribeConfig()
+                ));
+
             const trimmed = text.trim();
             if (!trimmed) {
                 new Notice(t().notices.transcribeEmpty);
@@ -1365,14 +1508,22 @@ export default class SystemRecordingPlugin extends Plugin {
                 this.setActionStatus(t().statusBar.transcribeFailed, "error");
                 return;
             }
+            // Tell the reader (and the enrichment model) who "Me"/"Them" are,
+            // so owner attribution of action items has something to go on.
+            const finalText = diarized
+                ? `${t().transcript.speakerBanner}\n\n${text}`
+                : text;
             const noteFound = await this.handleTranscriptionCompleted({
                 audioFile: recording,
-                transcription: text,
+                transcription: finalText,
                 file: null,
             });
             if (!noteFound) {
                 new Notice(t().notices.transcribeNoNote(recording.basename));
             }
+            // The .me/.them/.speech sidecars are left in place: a later manual
+            // re-transcribe reuses them, and the retention sweep ages them out
+            // on the same rule as the audio.
         } catch (e) {
             const msg = e instanceof Error ? e.message : String(e);
             // The engine throws the partial text (marker-prefixed) for a
@@ -1452,9 +1603,37 @@ export default class SystemRecordingPlugin extends Plugin {
     private notifyRecordingError(message: string): void {
         if (/screen[\s-]?(capture|recording)/i.test(message)) {
             new Notice(t().notices.screenPermission, 15000);
+            // Take the user straight to the pane they need to toggle instead of
+            // making them hunt through System Settings.
+            this.openScreenRecordingSettings();
         } else {
             new Notice(t().notices.recordingError(message));
         }
+    }
+
+    /** Whether we've already opened the Screen Recording pane this session, so a retry loop doesn't reopen System Settings repeatedly. */
+    private screenSettingsOpened = false;
+
+    /**
+     * Opens macOS System Settings directly at Privacy & Security → Screen
+     * Recording so the user can grant Obsidian access. Best-effort and
+     * macOS-only; opened at most once per session. macOS can't be made to grant
+     * the permission programmatically (and won't re-show the initial prompt once
+     * the grant is stale after a rename), so surfacing the exact pane is the
+     * most we can automate.
+     */
+    private openScreenRecordingSettings(): void {
+        if (!Platform.isMacOS || this.screenSettingsOpened) return;
+        this.screenSettingsOpened = true;
+        execFile(
+            "open",
+            [
+                "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture",
+            ],
+            (err) => {
+                if (err) console.warn("Failed to open Screen Recording settings", err);
+            }
+        );
     }
 
     // MARK: - UI helpers
@@ -1944,7 +2123,7 @@ export default class SystemRecordingPlugin extends Plugin {
             const folders = [
                 ...new Set([
                     ...this.configuredMeetingRoots(),
-                    this.settings.recordingFolder.trim() || "recordings",
+                    this.settings.recordingFolder.trim() || "Recordings",
                 ]),
             ].filter((f) => f.length > 0);
             const expired = findExpiredRecordings(files, {
@@ -1958,7 +2137,24 @@ export default class SystemRecordingPlugin extends Plugin {
             });
 
             let removed = 0;
+            const trash = async (p: string): Promise<boolean> => {
+                const f = this.app.vault.getAbstractFileByPath(p);
+                if (!(f instanceof TFile)) return false;
+                try {
+                    await this.app.fileManager.trashFile(f);
+                    return true;
+                } catch (e) {
+                    console.warn(`[Meeting Copilot] failed to trash ${p}`, e);
+                    return false;
+                }
+            };
+            // Pass 1: primary recordings. The split sidecars (`.me`/`.them`/
+            // `.speech.json`) have no owning note of their own, so they never
+            // pass the note gate on their own — prune them together with the
+            // primary recording they belong to instead (otherwise they'd leak
+            // forever once the primary is gone).
             for (const info of expired) {
+                if (isSidecarPath(info.path)) continue;
                 const file = this.app.vault.getAbstractFileByPath(info.path);
                 if (!(file instanceof TFile)) continue;
                 // Resolve the meeting note that owns THIS audio — colocated
@@ -1970,9 +2166,13 @@ export default class SystemRecordingPlugin extends Plugin {
                 // audio) or the transcript was never captured — deleting those
                 // would destroy the only copy.
                 if (!note || !this.noteHasSavedTranscript(note)) continue;
-                try {
-                    await this.app.fileManager.trashFile(file);
+                if (await trash(info.path)) {
                     removed++;
+                    // Trash the split sidecars alongside the primary recording.
+                    const sc = sidecarPathsFor(info.path);
+                    await trash(sc.me);
+                    await trash(sc.them);
+                    await trash(sc.speech);
                     // Drop the note's now-dangling link (transcript stays in the note).
                     await this.app.fileManager.processFrontMatter(note, (fm) => {
                         const f = fm as Record<string, unknown>;
@@ -1981,12 +2181,18 @@ export default class SystemRecordingPlugin extends Plugin {
                             .toISOString()
                             .slice(0, 10);
                     });
-                } catch (e) {
-                    console.warn(
-                        `[Meeting Copilot] failed to trash ${info.path}`,
-                        e
-                    );
                 }
+            }
+            // Pass 2: sweep expired sidecars whose primary recording is already
+            // gone (orphans — e.g. from an older build that pruned the primary
+            // but left the sidecars). Sidecars still sitting next to a live
+            // primary are left alone; pass 1 owns those.
+            for (const info of expired) {
+                const base = baseRecordingPathOf(info.path);
+                if (!base) continue;
+                if (this.app.vault.getAbstractFileByPath(base) instanceof TFile)
+                    continue;
+                if (await trash(info.path)) removed++;
             }
 
             if (removed > 0) {
@@ -2148,6 +2354,19 @@ export default class SystemRecordingPlugin extends Plugin {
         }
         const f = this.app.vault.getAbstractFileByPath(vaultPath);
         return f instanceof TFile ? f : null;
+    }
+
+    /**
+     * The folder a meeting note's recording should be written to: the configured
+     * "Recordings" subfolder of the note's own folder, or the note's folder
+     * itself when the subfolder is blank (colocated, pre-0.2 behavior).
+     */
+    private recordingFolderFor(noteFolder: string): string {
+        const sub = this.settings.recordingSubfolder
+            .trim()
+            .replace(/^\/+|\/+$/g, "");
+        if (!sub) return noteFolder;
+        return normalizePath(noteFolder ? `${noteFolder}/${sub}` : sub);
     }
 
     /** Returns a vault-relative `.wav` path, appending -2, -3… if the name is taken. */

@@ -8,13 +8,16 @@ guard args.count >= 6,
       args[1] == "start",
       args[2] == "--output",
       args[4] == "--stop-file" else {
-    let errorJson = "{\"status\": \"error\", \"message\": \"Usage: system-recorder start --output <path> --stop-file <path>\"}"
+    let errorJson = "{\"status\": \"error\", \"message\": \"Usage: system-recorder start --output <path> --stop-file <path> [--split]\"}"
     FileHandle.standardOutput.write(Data((errorJson + "\n").utf8))
     exit(1)
 }
 
 let finalOutputPath = args[3]
 let stopFilePath = args[5]
+
+// Optional flag after the required args. Absent = exactly today's behavior.
+let split = args.count > 6 && args[6] == "--split"
 
 // Record to a temp file, then move to final path when done
 let tempOutputURL = URL(fileURLWithPath: NSTemporaryDirectory())
@@ -36,7 +39,7 @@ if #available(macOS 13.0, *) {
     let mixer: AudioMixer
 
     do {
-        mixer = try AudioMixer(outputURL: tempOutputURL)
+        mixer = try AudioMixer(outputURL: tempOutputURL, split: split)
     } catch {
         emitJSON(["status": "error", "message": "Failed to create audio writer: \(error.localizedDescription)"])
         exit(1)
@@ -81,7 +84,29 @@ if #available(macOS 13.0, *) {
                 let finalURL = URL(fileURLWithPath: finalOutputPath)
                 try? FileManager.default.moveItem(at: tempOutputURL, to: finalURL)
 
-                emitJSON(["status": "stopped", "duration": Int(duration), "file": finalOutputPath])
+                let stopped: [String: Any] = ["status": "stopped", "duration": Int(duration), "file": finalOutputPath]
+
+                // When split, relocate the sidecars next to the final recording.
+                // Discovery downstream is by naming convention, so we don't
+                // report the paths back; a missing sidecar is skipped and never
+                // fails the recording.
+                if split {
+                    let finalSidecars = AudioMixer.sidecarURLs(forBase: finalURL)
+                    let moves: [(temp: URL, final: URL)] = [
+                        (mixer.meSidecarURL, finalSidecars.me),
+                        (mixer.themSidecarURL, finalSidecars.them),
+                        (mixer.speechSidecarURL, finalSidecars.speech),
+                    ]
+                    for move in moves {
+                        guard FileManager.default.fileExists(atPath: move.temp.path) else { continue }
+                        if FileManager.default.fileExists(atPath: move.final.path) {
+                            try? FileManager.default.removeItem(at: move.final)
+                        }
+                        try? FileManager.default.moveItem(at: move.temp, to: move.final)
+                    }
+                }
+
+                emitJSON(stopped)
                 exit(0)
             }
             return

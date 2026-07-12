@@ -10,6 +10,10 @@ export interface RecorderStatus {
     message?: string;
 }
 
+export interface RecorderStartOptions {
+    split?: boolean;
+}
+
 export class Recorder {
     private process: ChildProcess | null = null;
     private _isRecording = false;
@@ -22,7 +26,7 @@ export class Recorder {
         return this._isRecording;
     }
 
-    start(binaryPath: string, outputPath: string): void {
+    start(binaryPath: string, outputPath: string, opts?: RecorderStartOptions): void {
         if (this._isRecording) return;
 
         const stopFile = path.join(
@@ -31,10 +35,13 @@ export class Recorder {
         );
         this.stopFilePath = stopFile;
 
-        const proc = spawn(binaryPath, [
+        const spawnArgs = [
             "start", "--output", outputPath,
             "--stop-file", stopFile,
-        ], {
+        ];
+        if (opts?.split) spawnArgs.push("--split");
+
+        const proc = spawn(binaryPath, spawnArgs, {
             stdio: ["ignore", "pipe", "pipe"],
         });
         this.process = proc;
