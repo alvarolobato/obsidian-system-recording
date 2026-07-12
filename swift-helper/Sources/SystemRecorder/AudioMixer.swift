@@ -409,6 +409,9 @@ final class AudioMixer: @unchecked Sendable {
         // buffer filled and more remains); otherwise the final frames are lost.
         while true {
             guard let out = AVAudioPCMBuffer(pcmFormat: targetFormat, frameCapacity: AudioMixer.chunkFrames) else {
+                // Couldn't allocate the drain buffer — surface it rather than
+                // silently dropping the converter tail on a truncated stream.
+                latchCaptureError(.writeFailed("could not allocate a buffer to drain the audio converter"), on: stream)
                 return
             }
             var convError: NSError?
