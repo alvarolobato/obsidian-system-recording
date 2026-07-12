@@ -162,6 +162,26 @@ Replace the OpenAI cloud call with a local Whisper engine.
   irrelevant for a single-user desktop plugin — the real driver here is
   privacy/offline-capability, not raw dollars saved.
 
+**If cloud transcription is effectively free to the user** (e.g. covered by
+an employer's existing OpenAI/enterprise agreement), the cost argument above
+mostly disappears — that was the weaker justification for local Whisper
+anyway at single-user volume. What survives: privacy/offline-capability,
+lower latency (no upload round-trip, matters more if we ever go real-time),
+and independence from IT/API-access changes (model deprecation, org policy,
+rate limits) outside our control. If none of those matter in a given
+deployment, local Whisper becomes a "nice to have," not a clear win — worth
+being explicit about rather than defaulting to "cheaper is better."
+
+**Meetily vs. building local Whisper into the plugin ourselves:** Meetily
+isn't a library to embed — it's a full standalone app (its own Rust backend,
+UI, storage, and summarization). Adopting it wholesale would mean giving up
+Obsidian-native integration (calendar linking, note templates, dashboard,
+retention logic) in favor of a separate app. Its value to us is as an
+**architecture reference** — proof that whisper.cpp/Parakeet + diarization +
+local-LLM summarization works well together at scale (~20k stars, active) —
+not as a dependency we'd pull in. We'd still build our own whisper.cpp
+integration inside the plugin; Meetily just de-risks the approach.
+
 ### D. Real diarization / voice identification (who specifically is talking)
 
 To go beyond "me vs. everyone else" toward naming individual participants:
@@ -211,6 +231,46 @@ To go beyond "me vs. everyone else" toward naming individual participants:
 - **Cost:** High dev effort (new runtime dependency, packaging, testing across
   meeting sizes). Local compute cost only (no per-minute fee) but real CPU/GPU
   load during/after meetings.
+
+#### Recommended enrollment UX: confirm-as-you-go, not upfront recording
+
+If we ever pursue named speaker identification, the enrollment step shouldn't
+be a dedicated "record your voice" onboarding flow — nobody does those. A
+better pattern, closer to how photo apps handle face clustering ("who is
+this?"):
+
+1. Run diarization on the "them" stream, producing unnamed speaker clusters
+   (Speaker A, B, C...) for that meeting.
+2. Pick a clean representative clip per cluster and ask the user to label it,
+   pre-populated with the meeting's calendar-invite attendee list (already
+   available via `googleCalendar.ts`) rather than free text — a 3-5 person
+   pick-list is a far easier matching problem than open-world identification.
+3. Compute a voice embedding from the confirmed clip and store it as that
+   person's voiceprint (a small fixed-size vector, not raw audio).
+4. On future meetings, match new speaker clusters against stored voiceprints
+   by similarity; only fall back to asking when confidence is low.
+
+This turns enrollment into a side effect of normal use instead of a setup
+tax, and pays off fastest for recurring meetings (standups, 1:1s) where the
+same people repeat — often zero manual input after the first meeting or two.
+
+Caveats worth designing around up front, not blockers:
+- **Cross-meeting matching is harder than in-call diarization.** A voiceprint
+  captured through one conferencing app's audio compression may not match
+  cleanly against another week's call from a different device — expect lower
+  confidence than within-meeting diarization, and design the UI around "not
+  sure, please confirm" rather than silent auto-labeling.
+- **Attendees ≠ speakers.** Invite lists won't always match who actually
+  spoke (dial-in guests, shared room accounts, declined-but-joined) — the
+  picker needs an "other / not in this list" escape hatch.
+- **This layer only names speakers it doesn't fix diarization itself** — if
+  the underlying diarization can't cleanly separate two similar voices in the
+  pre-mixed "them" stream, naming doesn't help.
+- **Voiceprints are biometric data.** Even stored locally as embeddings
+  rather than raw audio, this should plug into the plugin's existing
+  retention/deletion logic (`retention.ts`) rather than living outside it,
+  especially since meetings may include candidates or customers, not just
+  colleagues.
 
 ## 4. Obsidian community & adjacent open-source landscape
 
