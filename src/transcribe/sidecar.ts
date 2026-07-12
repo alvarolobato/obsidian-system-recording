@@ -62,7 +62,12 @@ export function isSidecarPath(path: string): boolean {
  * candidate per format the helper can produce.
  */
 export function baseRecordingCandidatesOf(path: string): string[] {
-	const ext = path.match(SIDECAR_AUDIO)?.[2]?.toLowerCase();
+	// Keep the matched extension's own case: vault lookups are case-sensitive,
+	// so a lowercased candidate would miss a manually renamed `foo.WAV` and
+	// the orphan sweep would trash its live sidecar. (The helper itself always
+	// writes lowercase; speech.json candidates below stay lowercase because
+	// they carry no case hint of their own.)
+	const ext = path.match(SIDECAR_AUDIO)?.[2];
 	if (ext) {
 		return [`${path.replace(SIDECAR_AUDIO, "")}.${ext}`];
 	}

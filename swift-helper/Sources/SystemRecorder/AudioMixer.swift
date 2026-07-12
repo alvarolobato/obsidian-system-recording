@@ -221,8 +221,11 @@ final class AudioMixer: @unchecked Sendable {
         // Fast path: AudioCaptureManager asks the OS for the target format up
         // front, so the common case needs no converter (and no per-callback
         // output allocation) at all — the capture callbacks run dozens of
-        // times per second for hours.
+        // times per second for hours. If a converter exists from an earlier
+        // source format, drain its resampler tail first so those frames land
+        // in stream order rather than at close time.
         if buffer.format == targetFormat {
+            drainConverterLocked(stream)
             do {
                 try stream.file?.write(from: buffer)
                 stream.framesWritten += AVAudioFramePosition(buffer.frameLength)
@@ -230,10 +233,20 @@ final class AudioMixer: @unchecked Sendable {
             return
         }
 
-        if stream.converter == nil || stream.converter?.inputFormat != buffer.format {
-            // Lazily created (source format is only known now); re-created if
-            // the source format ever changes mid-stream.
-            stream.converter = AVAudioConverter(from: buffer.format, to: targetFormat)
+        if let existing = stream.converter, existing.inputFormat != buffer.format {
+            // Source format changed mid-stream: drain the old converter's
+            // resampler tail in stream order before replacing it.
+            drainConverterLocked(stream)
+        }
+        if stream.converter == nil {
+            // Lazily created — the source format is only known now.
+            let converter = AVAudioConverter(from: buffer.format, to: targetFormat)
+            // Mix multichannel sources down instead of the default channel
+            // remap, which keeps only channel 0 — that would silence a mic
+            // wired to input 2 of a multi-input interface, or drop hard-panned
+            // system audio if the OS ignores the mono capture request.
+            converter?.downmix = true
+            stream.converter = converter
         }
         guard let converter = stream.converter,
               let converted = convertToTarget(buffer, using: converter),
@@ -277,11 +290,19 @@ final class AudioMixer: @unchecked Sendable {
         // survive too (floatChannelData is nil for non-float formats, which
         // would silently yield silence). The buffers line up 1:1 because
         // pcmBuffer was allocated with the source's own format.
-        let ablPtr = UnsafeMutableAudioBufferListPointer(ablPointer)
-        let dstABL = UnsafeMutableAudioBufferListPointer(pcmBuffer.mutableAudioBufferList)
-        for i in 0..<min(ablPtr.count, dstABL.count) {
-            if let src = ablPtr[i].mData, let dst = dstABL[i].mData {
-                memcpy(dst, src, min(Int(ablPtr[i].mDataByteSize), Int(dstABL[i].mDataByteSize)))
+        //
+        // withExtendedLifetime is load-bearing: with the 16-byte-alignment
+        // flag, CoreMedia may back the ABL with a freshly allocated block
+        // buffer owned solely by `blockBuffer`, and nothing else references it
+        // after the getter — ARC in a release build could free it before the
+        // memcpy reads the memory it owns.
+        withExtendedLifetime(blockBuffer) {
+            let ablPtr = UnsafeMutableAudioBufferListPointer(ablPointer)
+            let dstABL = UnsafeMutableAudioBufferListPointer(pcmBuffer.mutableAudioBufferList)
+            for i in 0..<min(ablPtr.count, dstABL.count) {
+                if let src = ablPtr[i].mData, let dst = dstABL[i].mData {
+                    memcpy(dst, src, min(Int(ablPtr[i].mDataByteSize), Int(dstABL[i].mDataByteSize)))
+                }
             }
         }
 
@@ -323,25 +344,31 @@ final class AudioMixer: @unchecked Sendable {
         return duration
     }
 
+    /// Drains a converter's buffered resampler tail into the stream's temp
+    /// file and discards the converter. Requires `stream.lock` to be held.
+    private func drainConverterLocked(_ stream: Stream) {
+        defer { stream.converter = nil }
+        guard let converter = stream.converter, let file = stream.file,
+              let out = AVAudioPCMBuffer(pcmFormat: targetFormat, frameCapacity: AudioMixer.chunkFrames) else {
+            return
+        }
+        var convError: NSError?
+        let status = converter.convert(to: out, error: &convError) { _, outStatus in
+            outStatus.pointee = .endOfStream
+            return nil
+        }
+        if status != .error && out.frameLength > 0 {
+            try? file.write(from: out)
+            stream.framesWritten += AVAudioFramePosition(out.frameLength)
+        }
+    }
+
     /// Flushes the stream's converter tail into its temp file and closes it.
     private func closeStream(_ stream: Stream) {
         stream.lock.lock()
         defer { stream.lock.unlock() }
         stream.closed = true
-
-        if let converter = stream.converter, let file = stream.file,
-           let out = AVAudioPCMBuffer(pcmFormat: targetFormat, frameCapacity: AudioMixer.chunkFrames) {
-            var convError: NSError?
-            let status = converter.convert(to: out, error: &convError) { _, outStatus in
-                outStatus.pointee = .endOfStream
-                return nil
-            }
-            if status != .error && out.frameLength > 0 {
-                try? file.write(from: out)
-                stream.framesWritten += AVAudioFramePosition(out.frameLength)
-            }
-        }
-        stream.converter = nil
+        drainConverterLocked(stream)
         stream.file = nil // closes the file
     }
 

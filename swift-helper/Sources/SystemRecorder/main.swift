@@ -153,10 +153,16 @@ if #available(macOS 13.0, *) {
                     emitJSON(stopped)
                     exit(0)
                 } catch {
-                    // Name the surviving temp PCM files: a failed encode must
-                    // not leave the only copy of the meeting unfindable.
+                    // Name every surviving copy of the audio: the finished mix
+                    // (present when only the move into the vault failed, since
+                    // finalize deletes the stream temps on its success path)
+                    // and the per-stream PCM temps. A failed stop must not
+                    // leave the only copy of the meeting unfindable.
+                    var salvage = mixer.salvageablePaths
+                    if FileManager.default.fileExists(atPath: tempOutputURL.path) {
+                        salvage.insert(tempOutputURL.path, at: 0)
+                    }
                     var message = "Failed to finalize recording: \(error.localizedDescription)"
-                    let salvage = mixer.salvageablePaths
                     if !salvage.isEmpty {
                         message += " — captured audio preserved at: \(salvage.joined(separator: ", "))"
                     }

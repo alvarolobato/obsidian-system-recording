@@ -28,6 +28,14 @@ describe("isSidecarPath / baseRecordingCandidatesOf", () => {
 		]);
 	});
 
+	it("preserves the sidecar's extension case in the parent candidate", () => {
+		// Vault lookups are case-sensitive; a lowercased candidate would miss
+		// a manually renamed foo.WAV and orphan-sweep its live sidecar.
+		expect(baseRecordingCandidatesOf("Meetings/foo.me.WAV")).toEqual([
+			"Meetings/foo.WAV",
+		]);
+	});
+
 	it("treats a plain recording (and unrelated files) as non-sidecars", () => {
 		expect(isSidecarPath("Meetings/foo.wav")).toBe(false);
 		expect(baseRecordingCandidatesOf("Meetings/foo.wav")).toEqual([]);
