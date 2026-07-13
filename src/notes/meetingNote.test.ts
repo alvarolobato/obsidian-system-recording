@@ -23,6 +23,8 @@ import {
 	transcriptAtBottom,
 	upsertSection,
 } from "./meetingNote";
+import { extractSection, extractTranscript } from "./enrichedBlock";
+import { mergeActionItems } from "./actionItems";
 
 // --- Fake vault/App, since the mocked "obsidian" module ships no real Vault. ---
 
@@ -255,6 +257,35 @@ describe("transcriptAtBottom", () => {
 		expect(out).not.toContain("old body");
 		expect(out).toContain("## Action items\n\n- a");
 		expect(out.trimEnd().endsWith("> fresh")).toBe(true);
+	});
+
+	// Regression: the transcript callout has no heading of its own, so it lives
+	// inside the trailing "## Action items" section. Enrichment must strip it
+	// before merging task checkboxes and re-pin it to the bottom, otherwise the
+	// new tasks land *after* the transcript (bug #64 screenshot).
+	it("keeps the transcript below action items when tasks are merged in", () => {
+		// A note as it looks after insertTranscript ran on the default template.
+		const withTranscript = transcriptAtBottom(
+			"# T\n\n## Notes\n\nnote body\n\n## Summary\n\n\n## Action items\n\n",
+			"Alice: hi\nBob: hello"
+		);
+
+		// Mirror enrichMeetingNote: pull the transcript out first, upsert the
+		// action items, then re-pin the transcript to the bottom.
+		const transcript = extractTranscript(withTranscript);
+		expect(transcript.length).toBeGreaterThan(0);
+		let updated = stripTranscript(withTranscript);
+		const existing = extractSection(updated, "## Action items");
+		const merged = mergeActionItems(existing, ["- [ ] follow up with Bob"]);
+		updated = upsertSection(updated, "## Action items", merged);
+		updated = transcriptAtBottom(updated, transcript);
+
+		// Transcript is last; the task sits under the heading, above it.
+		expect(updated.indexOf("- [ ] follow up with Bob")).toBeLessThan(
+			updated.indexOf("[!quote]- Transcript")
+		);
+		expect(updated.trimEnd().endsWith("> Bob: hello")).toBe(true);
+		expect(updated.match(/\[!quote\]- Transcript/g)?.length).toBe(1);
 	});
 });
 

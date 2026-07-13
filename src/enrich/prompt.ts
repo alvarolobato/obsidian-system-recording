@@ -9,11 +9,11 @@ export interface EnrichmentContext {
 
 /** Fixed system role; the editable part is the user prompt below. */
 export const ENRICH_SYSTEM_PROMPT =
-	"You are an expert meeting-notes assistant. You turn a participant's raw " +
-	"notes and a meeting transcript into clear, faithful, well-organized notes " +
-	"that capture everything of substance that was discussed, grouped under " +
-	"descriptive topic headings. You never invent facts, and you write the kind " +
-	"of notes a busy colleague would actually want to read.";
+	"You are an expert meeting-notes assistant. You distill a participant's raw " +
+	"notes and a meeting transcript into concise, faithful notes a busy " +
+	"colleague can skim in under a minute. You favor signal over completeness: " +
+	"short, telegraphic bullets, no filler, no meta-commentary. You never " +
+	"invent facts.";
 
 /** Default, Granola-style user prompt. Placeholders are filled by fillPrompt(). */
 export const DEFAULT_ENRICH_PROMPT = `Meeting: {{title}}
@@ -30,20 +30,24 @@ Transcript (may be empty):
 {{transcript}}
 """
 
-Write clear, well-organized notes in Markdown that summarize what was discussed and decided, so someone who wasn't there can understand it. Capture every substantive topic — including tangents and seemingly unrelated ones — but skip pure small talk, greetings, and scheduling back-and-forth.
+Write concise, skimmable meeting notes in Markdown. A reader should get the gist in under a minute. Prefer fewer, sharper bullets over exhaustive coverage — this is a summary, not a transcript.
 
-Structure the notes as thematic sections:
-- Give each section a short, descriptive "### " heading that names the topic in its own terms (for example "### Entity model and design consistency"). Invent fitting headings; do not use generic labels like "Key points", "Summary", or "Decisions".
-- Under each heading use "- " bullets, with indented sub-bullets ("  - ") for supporting detail, examples, names, reasoning, and concrete references.
-- Fold the participant's own notes into the relevant sections and expand on them; never drop anything they wrote.
-- Finish with a "### Next steps" section listing action items as "- **Concise task** (Owner)", optionally followed by an indented sub-bullet with context. Use an attendee's name as the owner when the discussion makes it clear; otherwise omit it. Omit the whole section if there are genuinely no action items.
+Structure:
+- Open with a "### TL;DR" section: 2–4 short bullets capturing the essence — main outcome, key decisions, and anything urgent.
+- Follow with a handful of thematic sections (aim for 3–6, not one per tangent). Give each a short, descriptive "### " heading named in its own terms (for example "### Entity model"). Invent fitting headings; do not use generic labels like "Key points", "Discussion", or "Decisions".
+- Under each heading use a few terse "- " bullets — sentence fragments, not full sentences. Merge related points into one bullet; never split a single idea across several.
+- Nest a sub-bullet ("  - ") only when a point truly needs one concrete detail (a number, name, or example). Never go deeper than one level, and use nesting sparingly.
+- Fold the participant's own notes into the relevant sections; never drop anything they wrote.
+- Finish with a "### Next steps" section listing action items as "- **Concise task** (Owner)". Add an owner only when the discussion makes it clear. Omit the whole section if there are genuinely no action items.
 
-Rules:
-- Summarize the content directly. Never refer to "the meeting", "this session", "the call", "the transcript", "the recording", or "the notes", and never comment on whether something was or wasn't recorded, captured, or discussed — just write the substance itself.
-- If there is little or no substantive content, output only the little that exists (a short heading with a bullet or two). Do not pad it with meta-commentary about the absence of content, and do not add a "Next steps" section when there are no action items.
-- Ground every statement in the notes and/or transcript; never invent facts, names, numbers, or decisions.
-- When the notes and transcript conflict, prefer the participant's notes.
-- Be substantive but tight: do not quote the transcript verbatim or narrate it turn by turn.
+Keep it tight:
+- Match length to substance: a short meeting yields a short note. Do not pad. As a rough ceiling, keep the whole thing well under one screen of text for a typical 30-minute meeting.
+- Cover what matters and drop the rest: skip small talk, greetings, scheduling back-and-forth, and tangents that don't change any decision.
+- Write the substance directly. Never refer to "the meeting", "this session", "the call", "the transcript", "the recording", or "the notes", and never comment on what was or wasn't said, recorded, or discussed.
+- Never open a bullet with filler like "Discussed", "Noted that", "Acknowledged", "Talked about", "Mentioned", or "The point was raised" — state the fact itself.
+- If there is little or no substantive content, output only the little that exists (a short TL;DR with a bullet or two) and nothing more.
+- Ground every statement in the notes and/or transcript; never invent facts, names, numbers, or decisions. When they conflict, prefer the participant's notes.
+- Do not quote the transcript verbatim or narrate it turn by turn.
 - Output only the Markdown notes — no preamble, no closing remarks, and no top-level "#" heading.`;
 
 /** System role for generating a concise meeting title. */

@@ -17,6 +17,7 @@ import {
 	t,
 } from "./vendor/i18n/index";
 import { PathUtils } from "./vendor/utils/PathUtils";
+import { Logger, LogLevel } from "./vendor/utils/Logger";
 import { ProgressTracker } from "./vendor/ui/ProgressTracker";
 import { createSerialQueue } from "../util/serialize";
 import { mergeDiarized, type DiarSegment, type SpeechWindows } from "./diarize";
@@ -86,11 +87,20 @@ async function runController(
 	cfg: TranscribeConfig,
 	signal?: AbortSignal,
 	vadMode: APITranscriptionSettings["vadMode"] = "server",
-	onProgress?: (percent: number) => void
+	onProgress?: (percent: number) => void,
+	label = "single"
 ): Promise<ControllerResult> {
 	setTranscribeBaseUrl(cfg.baseUrl);
 	setTranscribeModelOverride(cfg.modelOverride);
 	setChatModelOverride(cfg.chatModel);
+	// Surface the vendored engine's own per-chunk / per-batch timing (it logs
+	// each chunk's elapsedTime at DEBUG) when debug mode is on. The singleton
+	// otherwise sits at INFO, which hides those lines. The coarse pass timing
+	// below is always on and cheap (a couple of lines per pass).
+	Logger.getInstance({
+		debugMode: cfg.debugMode,
+		logLevel: cfg.debugMode ? LogLevel.DEBUG : LogLevel.INFO,
+	});
 	const settings: APITranscriptionSettings = {
 		...DEFAULT_API_SETTINGS,
 		openaiApiKey: cfg.apiKey ? `PLAIN::${cfg.apiKey}` : "",
@@ -107,7 +117,39 @@ async function runController(
 	// forwards the engine's unified percentage to the caller.
 	const tracker = onProgress ? new ProgressTracker(onProgress) : undefined;
 	const controller = new TranscriptionController(app, settings, tracker);
-	return controller.transcribe(file, undefined, undefined, signal);
+	const t0 = perfNow();
+	const modelLabel = cfg.modelOverride
+		? `${cfg.model}→${cfg.modelOverride}`
+		: cfg.model;
+	// console.warn (not .info/.debug) so the line is visible in Obsidian's
+	// console without switching on Verbose — matches the vendored Logger.
+	console.warn(
+		`[Meeting Copilot][transcribe] ${label} pass start (model=${modelLabel}, vad=${vadMode}, postproc=${cfg.postProcessingEnabled}, dict=${cfg.dictionaryCorrectionEnabled})`
+	);
+	try {
+		const result = await controller.transcribe(file, undefined, undefined, signal);
+		console.warn(
+			`[Meeting Copilot][transcribe] ${label} pass done in ${elapsedSecs(t0)}s`
+		);
+		return result;
+	} catch (e) {
+		console.warn(
+			`[Meeting Copilot][transcribe] ${label} pass failed after ${elapsedSecs(t0)}s`
+		);
+		throw e;
+	}
+}
+
+/** High-resolution clock when available, wall-clock otherwise. */
+function perfNow(): number {
+	return typeof performance !== "undefined" && typeof performance.now === "function"
+		? performance.now()
+		: Date.now();
+}
+
+/** Seconds since `t0` (from {@link perfNow}), to one decimal. */
+function elapsedSecs(t0: number): string {
+	return ((perfNow() - t0) / 1000).toFixed(1);
 }
 
 /**
@@ -134,7 +176,7 @@ async function runTranscription(
 	const scaled = onProgress
 		? (p: number) => onProgress(normalizeEngineProgress(p))
 		: undefined;
-	const result = await runController(app, file, cfg, signal, "server", scaled);
+	const result = await runController(app, file, cfg, signal, "server", scaled, "mixed");
 	return typeof result === "string" ? result : result.text;
 }
 
@@ -267,8 +309,12 @@ export function transcribeDiarized(
 		// silence, the room audio isn't), shifting their timestamps out of sync
 		// and shearing the shared timeline the merge relies on. We want the raw,
 		// aligned clocks.
+		const tAll = perfNow();
+		console.warn(
+			"[Meeting Copilot][transcribe] diarized: 2 serial passes (me, them)"
+		);
 		try {
-			const meResult = await runController(app, meFile, cfg, signal, "disabled", meProgress);
+			const meResult = await runController(app, meFile, cfg, signal, "disabled", meProgress, "me");
 			if (signal?.aborted) {
 				throw new DOMException("Transcription aborted", "AbortError");
 			}
@@ -282,7 +328,7 @@ export function transcribeDiarized(
 				return { text: "", diarized: false, reason: "capability" };
 			}
 
-			const themResult = await runController(app, themFile, cfg, signal, "disabled", themProgress);
+			const themResult = await runController(app, themFile, cfg, signal, "disabled", themProgress, "them");
 			const themSegments = extractSegments(themResult);
 			if (isCapabilityMiss(themSegments, resultText(themResult))) {
 				return { text: "", diarized: false, reason: "capability" };
@@ -290,6 +336,9 @@ export function transcribeDiarized(
 
 			// Both passes honored timestamps. A stream empty here is legitimately
 			// silent; mergeDiarized handles one empty side, and two give "".
+			console.warn(
+				`[Meeting Copilot][transcribe] diarized both passes done in ${elapsedSecs(tAll)}s`
+			);
 			return { text: mergeDiarized(meSegments, themSegments, windows), diarized: true };
 		} catch (error) {
 			if (isDiarizationCancelled(error, signal)) {
