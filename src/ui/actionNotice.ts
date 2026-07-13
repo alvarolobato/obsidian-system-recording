@@ -32,8 +32,14 @@ export interface NoticeAction {
  * a meeting prompt offering "Join", "Record", and "Join & record". Any button
  * runs its handler and dismisses the notice. Buttons with no `label` are
  * skipped, so callers can omit an action (like "Join") by leaving it out.
+ * `onDismiss` (if given) fires after any button hides the notice, so the caller
+ * can drop its own reference (e.g. a bookkeeping map entry).
  */
-export function multiActionNotice(message: string, actions: NoticeAction[]): Notice {
+export function multiActionNotice(
+	message: string,
+	actions: NoticeAction[],
+	onDismiss?: () => void
+): Notice {
 	const frag = window.activeDocument.createDocumentFragment();
 	const container = frag.createDiv();
 	container.createSpan({ text: message });
@@ -50,6 +56,7 @@ export function multiActionNotice(message: string, actions: NoticeAction[]): Not
 		btn.addEventListener("click", () => {
 			action.onClick();
 			notice.hide();
+			onDismiss?.();
 		});
 	}
 	return notice;

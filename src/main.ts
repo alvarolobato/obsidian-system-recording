@@ -716,6 +716,9 @@ export default class SystemRecordingPlugin extends Plugin {
             this.startDurationTimer();
             this.updateRibbonIcon(true);
             this.agendaEvents.emit("changed", undefined);
+            // A recording is now underway, so any pending "meeting detected —
+            // record?" prompt is moot regardless of how this start was triggered.
+            this.dismissMeetingNotices("detect:");
 
             new Notice(t().notices.recordingStarted);
         } finally {
@@ -788,6 +791,7 @@ export default class SystemRecordingPlugin extends Plugin {
 		if (this.authExpired) return;
 		this.authExpired = true;
 		this.scheduler?.stop();
+		this.dismissMeetingNotices(SystemRecordingPlugin.CAL_NOTICE_PREFIX);
 		this.agendaEvents.emit("changed", undefined);
 		actionNotice(
 			t().notices.calendarReconnect,
@@ -823,6 +827,10 @@ export default class SystemRecordingPlugin extends Plugin {
 			if (!this.scheduler.isRunning) this.scheduler.start();
 		} else {
 			this.scheduler?.stop();
+			// No more boundary callbacks will fire, so sweep any calendar prompts
+			// still on screen rather than leaving them stale (detection prompts,
+			// driven separately, are left alone).
+			this.dismissMeetingNotices(SystemRecordingPlugin.CAL_NOTICE_PREFIX);
 		}
 	}
 
@@ -930,6 +938,9 @@ export default class SystemRecordingPlugin extends Plugin {
 	 * left to the scheduler's own event-end handling.
 	 */
 	private onMeetingEnded(app: string): void {
+		// The detected meeting is over, so a pending "record?" prompt for it is
+		// moot — drop it whether or not we end up stopping a recording below.
+		this.dismissMeetingNotice(`detect:${app}`);
 		// Ignore if detection was disabled meanwhile (an in-flight poll's onEnd
 		// must not auto-stop after the user opted out), and only stop once *all*
 		// detected meetings have ended so one of several concurrent calls ending
@@ -1002,7 +1013,13 @@ export default class SystemRecordingPlugin extends Plugin {
 		this.meetingNotices.get(opts.key)?.hide();
 		this.meetingNotices.set(
 			opts.key,
-			multiActionNotice(`${opts.title} — ${opts.subtitle}`, actions)
+			multiActionNotice(
+				`${opts.title} — ${opts.subtitle}`,
+				actions,
+				// Once the user picks an action the notice is gone — drop our
+				// bookkeeping entry so the map only ever holds live prompts.
+				() => this.meetingNotices.delete(opts.key)
+			)
 		);
 
 		// Native OS notification (visible while minimized / on another Space);
@@ -1023,8 +1040,11 @@ export default class SystemRecordingPlugin extends Plugin {
 		});
 	}
 
+	/** Prefix for calendar-event prompt keys (vs. `detect:` for detected meetings). */
+	private static readonly CAL_NOTICE_PREFIX = "cal:";
+
 	/**
-	 * Dismisses the current persistent meeting prompt (if any). Used once a
+	 * Dismisses the persistent meeting prompt for one key (if any). Used once a
 	 * decision has been made for the meeting (auto-start fired, we're already
 	 * recording it, or it just ended) so a now-stale prompt doesn't linger or
 	 * stack under a new one.
@@ -1032,6 +1052,15 @@ export default class SystemRecordingPlugin extends Plugin {
 	private dismissMeetingNotice(key: string): void {
 		this.meetingNotices.get(key)?.hide();
 		this.meetingNotices.delete(key);
+	}
+
+	/** Dismisses every live prompt whose key starts with `prefix`. */
+	private dismissMeetingNotices(prefix: string): void {
+		for (const [key, notice] of this.meetingNotices) {
+			if (!key.startsWith(prefix)) continue;
+			notice.hide();
+			this.meetingNotices.delete(key);
+		}
 	}
 
 	private async fetchCalendarEvents(
@@ -1086,7 +1115,7 @@ export default class SystemRecordingPlugin extends Plugin {
 		if (this.settings.calendarAutoStart) {
 			// The lead-time heads-up is now moot — recording is (or is about to
 			// be) underway — so clear it rather than leaving it on screen.
-			this.dismissMeetingNotice(event.id);
+			this.dismissMeetingNotice(SystemRecordingPlugin.CAL_NOTICE_PREFIX + event.id);
 			if (this.currentRecordingEventId !== event.id) {
 				new Notice(t().event.autoStarted(event.summary));
 				void this.startMeetingRecording(this.toMeetingInfo(event), event.end);
@@ -1098,7 +1127,7 @@ export default class SystemRecordingPlugin extends Plugin {
 		// from the lead-time prompt (its Record button), in which case there's
 		// nothing to ask.
 		if (this.currentRecordingEventId === event.id) {
-			this.dismissMeetingNotice(event.id);
+			this.dismissMeetingNotice(SystemRecordingPlugin.CAL_NOTICE_PREFIX + event.id);
 			return;
 		}
 		const lateMs = Date.now() - event.start;
@@ -1127,7 +1156,7 @@ export default class SystemRecordingPlugin extends Plugin {
 	/** Shared calendar meeting prompt (upcoming + start). */
 	private promptCalendarMeeting(event: ScheduledEvent, subtitle: string): void {
 		this.promptMeeting({
-			key: event.id,
+			key: SystemRecordingPlugin.CAL_NOTICE_PREFIX + event.id,
 			title: event.summary,
 			subtitle,
 			meetLink: event.meetLink,
@@ -1229,7 +1258,7 @@ export default class SystemRecordingPlugin extends Plugin {
 		// (same id, re-added by a poll) can open its link afresh, and drop any
 		// lingering upcoming/start prompt for it (whether or not we recorded).
 		this.openedLinkEventIds.delete(event.id);
-		this.dismissMeetingNotice(event.id);
+		this.dismissMeetingNotice(SystemRecordingPlugin.CAL_NOTICE_PREFIX + event.id);
 
 		// Only act when *this* meeting's recording is the active one, so
 		// overlapping meetings can't stop the wrong recording (or prompt when
