@@ -206,6 +206,41 @@ describe("CalendarScheduler", () => {
 		expect(deps.onEventStart).toHaveBeenCalledTimes(2);
 	});
 
+	describe("hasActiveEvent", () => {
+		it("is false before the lead window and true from lead-time through end", async () => {
+			const now = { v: T - 5 * 60 * 1000 };
+			const s = new CalendarScheduler(
+				makeDeps(now, [evt()], { leadMs: () => 60 * 1000 })
+			);
+			await s.poll();
+
+			expect(s.hasActiveEvent()).toBe(false); // > lead before start
+			now.v = T - 30 * 1000; // inside the 1-min lead window
+			expect(s.hasActiveEvent()).toBe(true);
+			now.v = T + 1000; // live
+			expect(s.hasActiveEvent()).toBe(true);
+			now.v = T + 3_600_000 - 1; // just before end
+			expect(s.hasActiveEvent()).toBe(true);
+			now.v = T + 3_600_000; // at end (exclusive)
+			expect(s.hasActiveEvent()).toBe(false);
+		});
+
+		it("ignores the lead window when no lead is configured", async () => {
+			const now = { v: T - 1000 };
+			const s = new CalendarScheduler(makeDeps(now, [evt()]));
+			await s.poll();
+
+			expect(s.hasActiveEvent()).toBe(false); // just before start, no lead
+			now.v = T;
+			expect(s.hasActiveEvent()).toBe(true);
+		});
+
+		it("is false with no cached events", () => {
+			const s = new CalendarScheduler(makeDeps({ v: T }, []));
+			expect(s.hasActiveEvent()).toBe(false);
+		});
+	});
+
 	it("registers both intervals via registerInterval and clears them on stop", () => {
 		let seq = 0;
 		const setInterval = vi.fn(() => ++seq);

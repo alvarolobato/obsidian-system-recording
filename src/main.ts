@@ -919,6 +919,11 @@ export default class SystemRecordingPlugin extends Plugin {
 	/** Offers to record when a meeting is detected — unless we're already recording. */
 	private onMeetingDetected(app: string): void {
 		if (this.recorder.isRecording) return;
+		// A calendar meeting happening right now already produced its own
+		// (scheduler) notification — don't stack a second detection prompt for
+		// what is almost certainly the same meeting. (No scheduler / no live
+		// event ⇒ this is an unplanned meeting, so still prompt.)
+		if (this.scheduler?.hasActiveEvent()) return;
 		// A detected meeting has no calendar link to join, so only offer Record.
 		this.promptMeeting({
 			key: `detect:${app}`,

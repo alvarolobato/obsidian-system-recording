@@ -150,6 +150,20 @@ export class CalendarScheduler {
 		}
 	}
 
+	/**
+	 * True when a calendar event is currently within its "already notified"
+	 * window — from when the lead-time heads-up would fire through the event's
+	 * end (`[start - leadMs, end)`). Lets the plugin suppress the app-detection
+	 * prompt for a meeting the scheduler has already announced, so a scheduled
+	 * Zoom/Meet isn't double-notified.
+	 */
+	hasActiveEvent(now = this.deps.now()): boolean {
+		const leadMs = Math.max(0, this.deps.leadMs?.() ?? 0);
+		return this.events.some(
+			(e) => now >= e.start - leadMs && now < e.end
+		);
+	}
+
 	start(pollIntervalMs = POLL_INTERVAL_MS, tickIntervalMs = TICK_INTERVAL_MS): void {
 		if (this.pollTimer !== null) return;
 		this.lastTickAt = null;
