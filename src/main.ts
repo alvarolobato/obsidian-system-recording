@@ -1601,6 +1601,14 @@ export default class SystemRecordingPlugin extends Plugin {
 
             const trimmed = text.trim();
             if (!trimmed) {
+                // Log the outcome: an empty result after filtering is a common
+                // reason a re-transcribe "does nothing" — the note is left
+                // untouched on purpose (we never overwrite a transcript with
+                // nothing). Surfacing it makes that visible in the log instead
+                // of the run just going silent.
+                console.warn(
+                    `[Meeting Copilot][transcribe] "${recording.name}" produced an empty transcript after filtering; note left unchanged`
+                );
                 new Notice(t().notices.transcribeEmpty);
                 if (!this.recorder.isRecording) this.clearActionStatus();
                 return;
@@ -1622,6 +1630,11 @@ export default class SystemRecordingPlugin extends Plugin {
                 transcription: finalText,
                 file: null,
             });
+            console.warn(
+                `[Meeting Copilot][transcribe] "${recording.name}" completed: note ${
+                    noteFound ? "found and updated" : "NOT found (no note matched this recording)"
+                }`
+            );
             if (!noteFound) {
                 new Notice(t().notices.transcribeNoNote(recording.basename));
             }
@@ -1880,6 +1893,11 @@ export default class SystemRecordingPlugin extends Plugin {
             if (audio instanceof TFile && transcript) {
                 transcriptText = transcript;
                 const note = findMeetingNoteForAudio(this.app, audio);
+                console.warn(
+                    `[Meeting Copilot][transcribe] note match for "${audio.name}": ${
+                        note ? note.path : "none"
+                    } (insertTranscript=${this.settings.insertTranscript})`
+                );
                 // Skip if the transcriber already wrote into the meeting note.
                 const already =
                     p.file instanceof TFile &&
