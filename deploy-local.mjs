@@ -84,9 +84,13 @@ try {
 	fs.writeFileSync(BINARY_TS, original); // keep the worktree clean no matter what
 }
 
-// 3. Copy artifacts (never data.json).
+// 3. Copy artifacts (never data.json). fvad.wasm is optional — the build emits
+// it only when the dep is installed; local VAD falls back gracefully without it.
 for (const f of ["main.js", "manifest.json", "styles.css"]) {
 	fs.copyFileSync(f, path.join(DEST, f));
+}
+if (fs.existsSync("fvad.wasm")) {
+	fs.copyFileSync("fvad.wasm", path.join(DEST, "fvad.wasm"));
 }
 if (deployBinaryFrom) {
 	const target = path.join(DEST, "system-recorder");

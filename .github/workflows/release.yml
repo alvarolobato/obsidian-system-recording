@@ -124,10 +124,10 @@ jobs:
           # assets on an existing release instead of erroring out.
           if gh release view "${TAG}" >/dev/null 2>&1; then
             gh release upload "${TAG}" --clobber \
-              main.js manifest.json styles.css system-recorder
+              main.js manifest.json styles.css system-recorder fvad.wasm
           else
             gh release create "${TAG}" \
               --title "${TAG}" \
               --generate-notes \
-              main.js manifest.json styles.css system-recorder
+              main.js manifest.json styles.css system-recorder fvad.wasm
           fi

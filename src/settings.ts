@@ -89,6 +89,8 @@ export interface SystemRecordingSettings {
 	sttTranscriptionSupported: boolean | null;
 	/** Whether the configured endpoint actually returns segment timestamps. null = never probed, or invalidated by a later config change. */
 	sttTimestampsSupported: boolean | null;
+	/** Verbose transcription logging (per-chunk timing, rate-limit waits, retries) to the developer console. Off by default. */
+	debugLogging: boolean;
 	/** The `${apiBaseUrl}::${sttModel}` the two flags above were determined against; a mismatch means they're stale. */
 	sttTimestampsProbeKey: string;
 	// Enrichment.
@@ -141,10 +143,16 @@ export const DEFAULT_SETTINGS: SystemRecordingSettings = {
 	postProcessingEnabled: false,
 	dictionaryCorrectionEnabled: false,
 	dictionary: "",
-	diarizationEnabled: true,
+	// Off by default: diarization runs two full transcription passes (~2x the
+	// time of the mixed path) and speaker separation is still being hardened.
+	// Turn it on per-vault to get me/them labels; local WebRTC VAD then gates
+	// each stream's silence and cross-talk bleed is de-duped so the merge stays
+	// clean. Manual re-transcribe can also force it on/off per run.
+	diarizationEnabled: false,
 	sttTranscriptionSupported: null,
 	sttTimestampsSupported: null,
 	sttTimestampsProbeKey: "",
+	debugLogging: false,
 	enableEnrichment: true,
 	enrichModel: "gpt-4o",
 	enrichPrompt: DEFAULT_ENRICH_PROMPT,
@@ -725,6 +733,18 @@ export class SystemRecordingSettingTab extends PluginSettingTab {
 					.setValue(this.plugin.settings.insertTranscript)
 					.onChange(async (value) => {
 						this.plugin.settings.insertTranscript = value;
+						await this.plugin.saveSettings();
+					})
+			);
+
+		new Setting(containerEl)
+			.setName(s.settings.debugLogging.name)
+			.setDesc(s.settings.debugLogging.desc)
+			.addToggle((toggle) =>
+				toggle
+					.setValue(this.plugin.settings.debugLogging)
+					.onChange(async (value) => {
+						this.plugin.settings.debugLogging = value;
 						await this.plugin.saveSettings();
 					})
 			);

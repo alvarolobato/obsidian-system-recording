@@ -34,6 +34,11 @@ interface WhisperResponse {
 		text: string;
 		start: number;
 		end: number;
+		// MEETING-COPILOT PATCH: verbose_json confidence signals, forwarded so
+		// callers can drop silence hallucinations. See VENDOR.md.
+		no_speech_prob?: number;
+		avg_logprob?: number;
+		compression_ratio?: number;
 		words?: Array<{
 			word: string;
 			start: number;
@@ -205,6 +210,18 @@ export class WhisperClient extends ApiClient {
 					start: segment.start + chunk.startTime,
 					end: segment.end + chunk.startTime
 				};
+				// MEETING-COPILOT PATCH: carry through confidence signals when
+				// present so downstream silence-hallucination filtering can use
+				// them. See VENDOR.md.
+				if (segment.no_speech_prob !== undefined) {
+					mapped.noSpeechProb = segment.no_speech_prob;
+				}
+				if (segment.avg_logprob !== undefined) {
+					mapped.avgLogprob = segment.avg_logprob;
+				}
+				if (segment.compression_ratio !== undefined) {
+					mapped.compressionRatio = segment.compression_ratio;
+				}
 				if (segment.words) {
 					mapped.words = segment.words.map(word => ({
 						word: word.word,

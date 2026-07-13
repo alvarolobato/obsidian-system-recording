@@ -36,7 +36,7 @@ export interface AgendaViewHost {
 	onCreateNote(meeting: AgendaMeeting): void;
 	onStop(): void;
 	onOpenRecording(meeting: AgendaMeeting): void;
-	onTranscribe(meeting: AgendaMeeting): void;
+	onTranscribe(meeting: AgendaMeeting, mode: "diarized" | "mixed"): void;
 	onEnrich(meeting: AgendaMeeting): void;
 	onOpenLink(url: string): void;
 	onCopyLink(url: string): void;
@@ -395,7 +395,7 @@ export class MeetingAgendaView extends ItemView {
 			onCreateNote: (m) => this.host.onCreateNote(m),
 			onStop: () => this.host.onStop(),
 			onOpenRecording: (m) => this.host.onOpenRecording(m),
-			onTranscribe: (m) => this.host.onTranscribe(m),
+			onTranscribe: (m, mode) => this.host.onTranscribe(m, mode),
 			onEnrich: (m) => this.host.onEnrich(m),
 			onOpenLink: (m) => this.openLink(m),
 			onCopyLink: (m) => {

@@ -228,6 +228,10 @@ export abstract class ApiClient {
 				// Check if retryable
 				if (this.isRetryable(response.status) && retryCount < this.config.maxRetries) {
 					await this.delay(this.config.retryDelay * Math.pow(2, retryCount)); // Exponential backoff
+					// A cancel during the backoff must abort, not fire another request.
+					if (options.signal?.aborted) {
+						throw new Error('Request cancelled by user');
+					}
 					return this.executeWithRetry<T>(url, options, retryCount + 1);
 				}
 
@@ -247,16 +251,73 @@ export abstract class ApiClient {
 			return responseData;
 
 		} catch (error) {
-			// Handle network errors
-			if (error instanceof Error) {
-				// Check for user cancellation
+			// MEETING-COPILOT PATCH: retry transient network-level failures.
+			// Upstream re-threw every caught error immediately, so a momentary
+			// network drop (Mac sleep, VPN blip) failed the chunk for good.
+			// User cancellation is terminal — never retried.
+			if (options.signal?.aborted) {
+				throw new Error('Request cancelled by user');
+			}
+			// requestUrl throws (rather than returning a response) on network-level
+			// failures: connection reset, DNS hiccups, and ERR_NETWORK_IO_SUSPENDED
+			// when the Mac sleeps or a VPN blips mid-transcription. Those are
+			// transient, so retry them with the same exponential backoff used for
+			// 5xx/429 instead of failing the chunk permanently and shearing the
+			// transcript. HTTP errors don't land here (requestUrl uses throw:false).
+			if (this.isTransientNetworkError(error) && retryCount < this.config.maxRetries) {
+				this.logger.warn(
+					`Network error; retrying (${retryCount + 1}/${this.config.maxRetries})`,
+					error
+				);
+				await this.delay(this.config.retryDelay * Math.pow(2, retryCount));
+				// A cancel during the backoff must abort, not fire another request.
 				if (options.signal?.aborted) {
 					throw new Error('Request cancelled by user');
 				}
+				return this.executeWithRetry<T>(url, options, retryCount + 1);
+			}
+			if (error instanceof Error) {
 				throw error;
 			}
 			throw new Error('Unknown error occurred');
 		}
+	}
+
+	/**
+	 * True for transient, retryable network-level failures thrown by requestUrl
+	 * (as opposed to HTTP status errors, which are handled via isRetryable). We
+	 * match on the error message/code because requestUrl surfaces Chromium's
+	 * net:: errors and Node's errno codes as plain Error messages.
+	 */
+	private isTransientNetworkError(error: unknown): boolean {
+		if (!(error instanceof Error)) {
+			return false;
+		}
+		const code = (error as { code?: unknown }).code;
+		const haystack = `${error.message} ${typeof code === 'string' ? code : ''}`.toLowerCase();
+		// Specific network tells only — deliberately NOT bare "timeout" or
+		// "network error", which appear in application-level messages that retry
+		// can't fix (e.g. a workflow "chunk processing timeout").
+		return [
+			'net::', // Chromium/Electron net errors (net::ERR_*)
+			'err_network',
+			'err_connection',
+			'err_internet_disconnected',
+			'err_name_not_resolved',
+			'err_timed_out',
+			'etimedout', // Node errno
+			'esockettimedout',
+			'econnreset',
+			'econnrefused',
+			'econnaborted',
+			'enetdown',
+			'enetunreach',
+			'ehostunreach',
+			'eai_again',
+			'epipe',
+			'socket hang up',
+			'failed to fetch' // fetch/undici network failure
+		].some((needle) => haystack.includes(needle));
 	}
 
 	/**

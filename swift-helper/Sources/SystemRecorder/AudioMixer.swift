@@ -95,6 +95,18 @@ final class AudioMixer: @unchecked Sendable {
             .map { $0.tempURL.path }
     }
 
+    /// Frames captured so far per stream. The stop-time "no audio" guard only
+    /// fires at finalize, after a whole meeting is lost; the start-time watchdog
+    /// in main.swift reads this to fail fast when capture is delivering nothing
+    /// (usually a revoked Screen Recording / Microphone TCC grant after the
+    /// helper binary's hash changed) instead of recording into the void.
+    /// Read off the capture thread without the per-stream lock: a torn read only
+    /// affects whether we treat "a few frames" as 0, which the watchdog's
+    /// threshold already tolerates.
+    var capturedFrames: (system: AVAudioFramePosition, mic: AVAudioFramePosition) {
+        (systemStream.framesWritten, micStream.framesWritten)
+    }
+
     private let outputURL: URL
     private let format: RecordingFormat
     private let split: Bool

@@ -12,6 +12,8 @@ node_modules/
 # They should be uploaded to GitHub releases instead.
 main.js
 system-recorder
+# Build artifact copied from node_modules/@echogarden/fvad-wasm at build time.
+fvad.wasm
 
 # Exclude sourcemaps
 *.map

@@ -30,6 +30,7 @@
 		"vitest": "^4.1.7"
 	},
 	"dependencies": {
+		"@echogarden/fvad-wasm": "^0.2.0",
 		"obsidian": "latest"
 	}
 }

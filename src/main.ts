@@ -32,7 +32,9 @@ import {
     recordingLinkTarget,
     sanitizeName,
     scanMeetingNotes,
+    stripTranscript,
     templateStaticRoot,
+    transcriptAtBottom,
     upsertSection,
 } from "./notes/meetingNote";
 import {
@@ -54,8 +56,10 @@ import { findExpiredRecordings, underFolder } from "./recordings/retention";
 const ACTION_ITEMS_HEADING = "## Action items";
 import { chatComplete } from "./enrich/llm";
 import { isPartialTranscript } from "./transcribe/partial";
+import { stripHallucinatedLines } from "./transcribe/hallucination";
 import {
     initTranscribeEngine,
+    shouldInvalidateProbe,
     transcribeAudio,
     transcribeDiarized,
     type TranscribeConfig,
@@ -69,7 +73,8 @@ import {
     parseSpeechWindows,
     sidecarPathsFor,
 } from "./transcribe/sidecar";
-import type { SpeechWindows } from "./transcribe/diarize";
+import { preferWindows, type SpeechWindows } from "./transcribe/diarize";
+import { computeSpeechWindows } from "./transcribe/vadWindows";
 import { parseDictionary } from "./transcribe/dictionary";
 import type { TranscriptionModel } from "./transcribe/vendor/ApiSettings";
 import {
@@ -104,11 +109,23 @@ import { MeetingDetector } from "./detect/meetingDetector";
 import { googleMeetActive, zoomInMeeting } from "./detect/probe";
 import { execFile } from "child_process";
 
+/**
+ * How a transcribe run treats speaker separation:
+ *   - "auto":     respect the speaker-separation setting (auto-transcribe path)
+ *   - "diarized": force the separated pass (fall back to the joint track if
+ *                 no separate tracks were recorded)
+ *   - "mixed":    always transcribe the single joint track
+ */
+type TranscribeMode = "auto" | "diarized" | "mixed";
+
 export default class SystemRecordingPlugin extends Plugin {
     settings: SystemRecordingSettings;
     private recorder = new Recorder();
     private provisioner = new BinaryProvisioner(nodeDeps());
     private starting = false;
+    /** Dedupe identical capture warnings so a flapping device can't spam. */
+    private lastWarningMessage: string | null = null;
+    private lastWarningAt = 0;
     private statusBarEl: HTMLElement | null = null;
     private statusTimeout: number | null = null;
     private durationInterval: number | null = null;
@@ -576,13 +593,25 @@ export default class SystemRecordingPlugin extends Plugin {
         eventId?: string;
         note?: TFile;
     }) {
+        console.warn("[Meeting Copilot][recorder] startRecording requested", {
+            notePath: meeting.notePath,
+            eventId: meeting.eventId,
+            isRecording: this.recorder.isRecording,
+            starting: this.starting,
+        });
         if (this.recorder.isRecording) {
+            console.warn(
+                "[Meeting Copilot][recorder] startRecording skipped: already recording"
+            );
             new Notice(t().notices.alreadyRecording);
             return;
         }
 
         // A start is already in progress (binary provisioning may be awaiting)
         if (this.starting) {
+            console.warn(
+                "[Meeting Copilot][recorder] startRecording skipped: a start is already in progress"
+            );
             return;
         }
 
@@ -1041,7 +1070,7 @@ export default class SystemRecordingPlugin extends Plugin {
             onCreateNote: (m) => void this.createNoteOnly(m),
             onStop: () => this.stopRecording(),
             onOpenRecording: (m) => void this.openRecording(m),
-            onTranscribe: (m) => void this.transcribeRecording(m),
+            onTranscribe: (m, mode) => void this.transcribeRecording(m, mode),
             onEnrich: (m) => {
                 if (m.note) void this.enrichMeetingNote(m.note);
             },
@@ -1265,7 +1294,7 @@ export default class SystemRecordingPlugin extends Plugin {
             onCreateNote: (m) => void this.createNoteOnly(m),
             onStop: () => this.stopRecording(),
             onOpenRecording: (m) => void this.openRecording(m),
-            onTranscribe: (m) => void this.transcribeRecording(m),
+            onTranscribe: (m, mode) => void this.transcribeRecording(m, mode),
             onEnrich: (m) => {
                 if (m.note) void this.enrichMeetingNote(m.note);
             },
@@ -1334,13 +1363,22 @@ export default class SystemRecordingPlugin extends Plugin {
         await this.app.workspace.getLeaf(false).openFile(m.recording);
     }
 
-    /** Transcribes the meeting's recording with the built-in engine. */
-    private async transcribeRecording(m: AgendaMeeting): Promise<void> {
+    /**
+     * Transcribes the meeting's recording with the built-in engine.
+     *
+     * `mode` selects the pass: "auto" respects the speaker-separation setting
+     * (used by the auto-transcribe pipeline), while "diarized" / "mixed" let the
+     * user force separation on or off from the menus regardless of the setting.
+     */
+    private async transcribeRecording(
+        m: AgendaMeeting,
+        mode: TranscribeMode = "auto"
+    ): Promise<void> {
         if (!m.recording) {
             new Notice(t().agenda.notices.noRecording);
             return;
         }
-        await this.launchTranscriber(m.recording);
+        await this.launchTranscriber(m.recording, mode);
     }
 
     /**
@@ -1388,23 +1426,27 @@ export default class SystemRecordingPlugin extends Plugin {
             postProcessingEnabled: s.postProcessingEnabled,
             dictionaryCorrectionEnabled: s.dictionaryCorrectionEnabled,
             userDictionaries: parseDictionary(s.dictionary),
-            debugMode: false,
+            debugMode: s.debugLogging,
         };
     }
 
     /**
-     * Runs the speaker-separated pass when the split sidecars are present and
-     * the endpoint is known to emit timestamps. Returns the diarized transcript,
-     * or null when separation doesn't apply (feature off, or no sidecars on
-     * disk) or the endpoint returned no segments this pass and we fell back to
-     * the mixed file. On that fallback it also invalidates the cached probe so
-     * future meetings don't keep paying for the extra passes.
+     * Runs the speaker-separated pass. Returns the diarized transcript, or null
+     * when separation doesn't apply (no sidecars on disk) or the endpoint
+     * returned no segments this pass and we fell back to the mixed file. It only
+     * invalidates the cached probe when the fallback was a genuine capability
+     * miss (no timestamps); a transient error leaves the probe intact so speaker
+     * separation isn't disabled for future meetings.
+     *
+     * Whether to run this at all (respect the setting, or force it) is decided
+     * by the caller. When `forced` (the user explicitly asked for separation) a
+     * recording with no separate tracks surfaces a notice before falling back.
      */
     private async tryDiarizedTranscribe(
         recording: TFile,
+        forced: boolean,
         onProgress?: (percent: number) => void
     ): Promise<string | null> {
-        if (!this.shouldSeparateSpeakers()) return null;
         // Discover the split sidecars by naming convention so separation works
         // for both the auto-transcribe after stop and a manual re-run on an old
         // recording. The helper writes them straight to disk, so check the
@@ -1413,15 +1455,24 @@ export default class SystemRecordingPlugin extends Plugin {
         const sidecars = sidecarPathsFor(recording.path);
         const meFile = await this.resolveExistingFile(sidecars.me);
         const themFile = await this.resolveExistingFile(sidecars.them);
-        if (!meFile || !themFile) return null;
+        if (!meFile || !themFile) {
+            if (forced) new Notice(t().notices.diarizationNoTracks);
+            return null;
+        }
 
-        // speech.json is optional: a missing or malformed sidecar yields
-        // undefined windows, and the merge then keeps every segment.
-        let windows: SpeechWindows | undefined;
+        // Speech windows gate out Whisper's silence hallucinations without
+        // touching the audio (so the two streams keep their shared clock).
+        // Prefer local WebRTC VAD — a real speech/non-speech classifier — over
+        // the recorder's crude RMS gate, but merge per stream: if VAD found no
+        // speech on a stream, fall back to the recorder's speech.json for that
+        // stream (and to no filtering when neither is available).
+        const localWindows = await computeSpeechWindows(this.app, meFile, themFile);
+        let rmsWindows: SpeechWindows | undefined;
         const speech = await this.resolveExistingFile(sidecars.speech);
         if (speech) {
-            windows = parseSpeechWindows(await this.app.vault.read(speech));
+            rmsWindows = parseSpeechWindows(await this.app.vault.read(speech));
         }
+        const windows = preferWindows(localWindows, rmsWindows);
         const result = await transcribeDiarized(
             this.app,
             meFile,
@@ -1432,6 +1483,18 @@ export default class SystemRecordingPlugin extends Plugin {
             onProgress
         );
         if (result.diarized) return result.text;
+
+        // A transient failure this run (a flaky chunk, a network blip) must not
+        // be misread as "this endpoint can't do timestamps": that would null the
+        // probe and silently disable speaker separation for every future meeting
+        // until the user manually re-checks (issue #61). Only a genuine
+        // capability miss warrants invalidating the probe.
+        if (!shouldInvalidateProbe(result)) {
+            console.warn(
+                "[Meeting Copilot] diarization pass errored; using mixed audio for this meeting (probe left intact)"
+            );
+            return null;
+        }
 
         // The endpoint didn't return timestamps this pass (a misconfiguration
         // slipping past the probe). Invalidate the cached probe so we stop
@@ -1463,8 +1526,15 @@ export default class SystemRecordingPlugin extends Plugin {
      * Transcribes an audio file with the vendored engine (headless — no modal,
      * no separate transcript file). The transcript text is routed through the
      * same insert+enrich path used elsewhere.
+     *
+     * `mode` picks the pass: "auto" respects the speaker-separation setting,
+     * "diarized" forces the separated pass (falling back to the joint track when
+     * no separate tracks exist), and "mixed" always transcribes the joint track.
      */
-    private async launchTranscriber(recording: TFile): Promise<void> {
+    private async launchTranscriber(
+        recording: TFile,
+        mode: TranscribeMode = "auto"
+    ): Promise<void> {
         if (!this.settings.apiBaseUrl || !this.settings.apiKey) {
             new Notice(t().notices.transcribeNoEndpoint);
             return;
@@ -1487,16 +1557,30 @@ export default class SystemRecordingPlugin extends Plugin {
                 "busy"
             );
         };
+        const transcribeStart = Date.now();
+        const sizeMb = (recording.stat?.size ?? 0) / (1024 * 1024);
+        // console.warn so the timing line shows in Obsidian's console without
+        // enabling Verbose logging (mirrors the vendored engine's own logger).
+        console.warn(
+            `[Meeting Copilot][transcribe] "${recording.name}" begin (mode=${mode}, size=${sizeMb.toFixed(1)}MB)`
+        );
         try {
-            // Try the speaker-separated pass; a null means it didn't apply or
-            // fell back, in which case we transcribe the mixed wav (which always
-            // exists) with a single call.
-            const diarizedText = await this.tryDiarizedTranscribe(
-                recording,
-                onProgress
-            );
+            // Decide whether to run speaker separation: "auto" defers to the
+            // setting, "diarized" forces it on, "mixed" forces it off. A null
+            // back from the diarized pass means it didn't apply or fell back, in
+            // which case we transcribe the mixed wav (which always exists).
+            const wantDiarized =
+                mode === "diarized" ||
+                (mode === "auto" && this.shouldSeparateSpeakers());
+            const diarizedText = wantDiarized
+                ? await this.tryDiarizedTranscribe(
+                      recording,
+                      mode === "diarized",
+                      onProgress
+                  )
+                : null;
             const diarized = diarizedText !== null;
-            const text =
+            const rawText =
                 diarizedText ??
                 (await transcribeAudio(
                     this.app,
@@ -1505,9 +1589,29 @@ export default class SystemRecordingPlugin extends Plugin {
                     undefined,
                     onProgress
                 ));
+            const totalSecs = ((Date.now() - transcribeStart) / 1000).toFixed(1);
+            console.warn(
+                `[Meeting Copilot][transcribe] "${recording.name}" transcription finished in ${totalSecs}s (diarized=${diarized}${
+                    wantDiarized && !diarized ? ", fell back to mixed" : ""
+                })`
+            );
+            // The diarized path already filters silence hallucinations per
+            // segment before merging. The mixed path has no segment seam, so a
+            // silent recording can come back as nothing but a stock YouTube-outro
+            // phrase; strip those whole lines so it's treated as empty rather
+            // than written out as a bogus note/title.
+            const text = diarized ? rawText : stripHallucinatedLines(rawText);
 
             const trimmed = text.trim();
             if (!trimmed) {
+                // Log the outcome: an empty result after filtering is a common
+                // reason a re-transcribe "does nothing" — the note is left
+                // untouched on purpose (we never overwrite a transcript with
+                // nothing). Surfacing it makes that visible in the log instead
+                // of the run just going silent.
+                console.warn(
+                    `[Meeting Copilot][transcribe] "${recording.name}" produced an empty transcript after filtering; note left unchanged`
+                );
                 new Notice(t().notices.transcribeEmpty);
                 if (!this.recorder.isRecording) this.clearActionStatus();
                 return;
@@ -1529,6 +1633,11 @@ export default class SystemRecordingPlugin extends Plugin {
                 transcription: finalText,
                 file: null,
             });
+            console.warn(
+                `[Meeting Copilot][transcribe] "${recording.name}" completed: note ${
+                    noteFound ? "found and updated" : "NOT found (no note matched this recording)"
+                }`
+            );
             if (!noteFound) {
                 new Notice(t().notices.transcribeNoNote(recording.basename));
             }
@@ -1603,6 +1712,22 @@ export default class SystemRecordingPlugin extends Plugin {
         } else if (status.status === "error") {
             this.resetRecordingUi();
             this.notifyRecordingError(status.message ?? t().notices.unknownError);
+        } else if (status.status === "warning") {
+            // Non-fatal: a capture path hit trouble (usually a device-change
+            // restart that didn't take). Recording continues, but tell the user
+            // so a silent stream isn't discovered only at stop. Coalesce so a
+            // flapping device can't spam identical Notices.
+            const msg = status.message;
+            const now = Date.now();
+            if (
+                msg &&
+                (msg !== this.lastWarningMessage ||
+                    now - this.lastWarningAt > 30_000)
+            ) {
+                this.lastWarningMessage = msg;
+                this.lastWarningAt = now;
+                new Notice(msg);
+            }
         }
     }
 
@@ -1782,6 +1907,11 @@ export default class SystemRecordingPlugin extends Plugin {
             if (audio instanceof TFile && transcript) {
                 transcriptText = transcript;
                 const note = findMeetingNoteForAudio(this.app, audio);
+                console.warn(
+                    `[Meeting Copilot][transcribe] note match for "${audio.name}": ${
+                        note ? note.path : "none"
+                    } (insertTranscript=${this.settings.insertTranscript})`
+                );
                 // Skip if the transcriber already wrote into the meeting note.
                 const already =
                     p.file instanceof TFile &&
@@ -1896,7 +2026,15 @@ export default class SystemRecordingPlugin extends Plugin {
             });
             // Re-read in case the note changed during the network call.
             const current = await this.app.vault.read(file);
-            let updated = current;
+            // The transcript callout has no heading of its own, so it lives
+            // inside whatever section precedes it (usually "## Action items").
+            // Pull it out before any section edits — otherwise extractSection
+            // would scoop it up and merged action items would land *after* it —
+            // and re-pin it to the very bottom once everything else is placed.
+            const bottomTranscript = extractTranscript(current);
+            let updated = bottomTranscript.trim().length
+                ? stripTranscript(current)
+                : current;
             let calloutBody = output;
             // Lift action items out of the summary into real obsidian-tasks
             // checkboxes under "## Action items" (merged, never duplicated).
@@ -1910,6 +2048,10 @@ export default class SystemRecordingPlugin extends Plugin {
                 }
             }
             updated = withEnrichedBlock(updated, calloutBody);
+            // Keep the transcript pinned to the very bottom of the note.
+            if (bottomTranscript.trim().length) {
+                updated = transcriptAtBottom(updated, bottomTranscript);
+            }
             await this.app.vault.modify(file, updated);
             await this.app.fileManager.processFrontMatter(file, (f) => {
                 (f as Record<string, unknown>).status = "enriched";

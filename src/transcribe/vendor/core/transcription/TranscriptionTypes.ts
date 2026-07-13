@@ -39,6 +39,14 @@ export interface TranscriptionSegment {
 	start: number;
 	/** End time in seconds */
 	end: number;
+	// MEETING-COPILOT PATCH: verbose_json confidence signals, forwarded so
+	// callers can drop silence hallucinations. See VENDOR.md.
+	/** Whisper no_speech_prob for this segment (0–1; high ⇒ likely silence). */
+	noSpeechProb?: number;
+	/** Whisper avg_logprob for this segment (low ⇒ low-confidence text). */
+	avgLogprob?: number;
+	/** Whisper compression_ratio for this segment (high ⇒ repetitive gibberish). */
+	compressionRatio?: number;
 	/** Word-level timestamps (if available) */
 	words?: Array<{
 		word: string;

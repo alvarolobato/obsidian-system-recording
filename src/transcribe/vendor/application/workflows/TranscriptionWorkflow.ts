@@ -28,10 +28,15 @@ export interface WorkflowResult {
 	duration: number;
 	chunks: number;
 	strategy: ChunkStrategy;
+	// MEETING-COPILOT PATCH: optional confidence signals for silence-hallucination
+	// filtering. See VENDOR.md.
 	segments?: Array<{
 		text: string;
 		start: number;
 		end: number;
+		noSpeechProb?: number;
+		avgLogprob?: number;
+		compressionRatio?: number;
 	}>;
 	/** The actual model used for transcription */
 	modelUsed?: string;

@@ -14,7 +14,16 @@ import type { ChunkProcessingMode } from '../chunking/ChunkingTypes';
 
 export interface TranscriptionExecutionResult {
 	text: string;
-	segments?: Array<{ text: string; start: number; end: number; }>;
+	// MEETING-COPILOT PATCH: optional confidence signals carried alongside the
+	// timestamped segments for silence-hallucination filtering. See VENDOR.md.
+	segments?: Array<{
+		text: string;
+		start: number;
+		end: number;
+		noSpeechProb?: number;
+		avgLogprob?: number;
+		compressionRatio?: number;
+	}>;
 	partial?: boolean;
 	error?: string;
 }
@@ -129,7 +138,15 @@ export abstract class TranscriptionStrategy {
 				const mergedText = await this.mergeResults(results);
 
 				// Collect all segments if available
-				let allSegments: Array<{ text: string; start: number; end: number; }> | undefined;
+				// MEETING-COPILOT PATCH: widen to carry confidence signals. See VENDOR.md.
+				let allSegments: Array<{
+					text: string;
+					start: number;
+					end: number;
+					noSpeechProb?: number;
+					avgLogprob?: number;
+					compressionRatio?: number;
+				}> | undefined;
 				if (options.timestamps) {
 					const validResults = results.filter(r => r.success && r.segments);
 					if (validResults.length > 0) {

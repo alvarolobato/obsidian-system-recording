@@ -17,9 +17,11 @@ import {
 	t,
 } from "./vendor/i18n/index";
 import { PathUtils } from "./vendor/utils/PathUtils";
+import { Logger, LogLevel } from "./vendor/utils/Logger";
 import { ProgressTracker } from "./vendor/ui/ProgressTracker";
 import { createSerialQueue } from "../util/serialize";
 import { mergeDiarized, type DiarSegment, type SpeechWindows } from "./diarize";
+import { stripHallucinatedLines } from "./hallucination";
 import en from "./vendor/i18n/translations/en";
 import ja from "./vendor/i18n/translations/ja";
 import ko from "./vendor/i18n/translations/ko";
@@ -85,11 +87,20 @@ async function runController(
 	cfg: TranscribeConfig,
 	signal?: AbortSignal,
 	vadMode: APITranscriptionSettings["vadMode"] = "server",
-	onProgress?: (percent: number) => void
+	onProgress?: (percent: number) => void,
+	label = "single"
 ): Promise<ControllerResult> {
 	setTranscribeBaseUrl(cfg.baseUrl);
 	setTranscribeModelOverride(cfg.modelOverride);
 	setChatModelOverride(cfg.chatModel);
+	// Surface the vendored engine's own per-chunk / per-batch timing (it logs
+	// each chunk's elapsedTime at DEBUG) when debug mode is on. The singleton
+	// otherwise sits at INFO, which hides those lines. The coarse pass timing
+	// below is always on and cheap (a couple of lines per pass).
+	Logger.getInstance({
+		debugMode: cfg.debugMode,
+		logLevel: cfg.debugMode ? LogLevel.DEBUG : LogLevel.INFO,
+	});
 	const settings: APITranscriptionSettings = {
 		...DEFAULT_API_SETTINGS,
 		openaiApiKey: cfg.apiKey ? `PLAIN::${cfg.apiKey}` : "",
@@ -106,7 +117,39 @@ async function runController(
 	// forwards the engine's unified percentage to the caller.
 	const tracker = onProgress ? new ProgressTracker(onProgress) : undefined;
 	const controller = new TranscriptionController(app, settings, tracker);
-	return controller.transcribe(file, undefined, undefined, signal);
+	const t0 = perfNow();
+	const modelLabel = cfg.modelOverride
+		? `${cfg.model}→${cfg.modelOverride}`
+		: cfg.model;
+	// console.warn (not .info/.debug) so the line is visible in Obsidian's
+	// console without switching on Verbose — matches the vendored Logger.
+	console.warn(
+		`[Meeting Copilot][transcribe] ${label} pass start (model=${modelLabel}, vad=${vadMode}, postproc=${cfg.postProcessingEnabled}, dict=${cfg.dictionaryCorrectionEnabled})`
+	);
+	try {
+		const result = await controller.transcribe(file, undefined, undefined, signal);
+		console.warn(
+			`[Meeting Copilot][transcribe] ${label} pass done in ${elapsedSecs(t0)}s`
+		);
+		return result;
+	} catch (e) {
+		console.warn(
+			`[Meeting Copilot][transcribe] ${label} pass failed after ${elapsedSecs(t0)}s`
+		);
+		throw e;
+	}
+}
+
+/** High-resolution clock when available, wall-clock otherwise. */
+function perfNow(): number {
+	return typeof performance !== "undefined" && typeof performance.now === "function"
+		? performance.now()
+		: Date.now();
+}
+
+/** Seconds since `t0` (from {@link perfNow}), to one decimal. */
+function elapsedSecs(t0: number): string {
+	return ((perfNow() - t0) / 1000).toFixed(1);
 }
 
 /**
@@ -133,7 +176,7 @@ async function runTranscription(
 	const scaled = onProgress
 		? (p: number) => onProgress(normalizeEngineProgress(p))
 		: undefined;
-	const result = await runController(app, file, cfg, signal, "server", scaled);
+	const result = await runController(app, file, cfg, signal, "server", scaled, "mixed");
 	return typeof result === "string" ? result : result.text;
 }
 
@@ -149,14 +192,21 @@ function resultText(result: ControllerResult): string {
 }
 
 /**
- * A pass that produced no segments but non-blank text is a capability miss: the
- * endpoint transcribed the audio yet ignored the timestamp request, so we have
- * nothing to place on the shared clock and can't diarize. Distinguished from a
- * legitimately silent stream (no segments AND no text), which is fine, the
- * merge labels every line from the other stream and two silent streams give "".
+ * A pass that produced no segments but real (non-hallucination) text is a
+ * capability miss: the endpoint transcribed the audio yet ignored the timestamp
+ * request, so we have nothing to place on the shared clock and can't diarize.
+ *
+ * Distinguished from:
+ *   - a legitimately silent stream (no segments AND no text), and
+ *   - a SILENT stream whose text is nothing but a Whisper hallucination
+ *     ("Thanks for watching."): an endpoint that drops the segments array on
+ *     silence (some proxies do) must NOT be read as timestamp-incapable, or a
+ *     silent meeting would null the probe and disable speaker separation for
+ *     every future meeting (the #61 failure mode). Strip stock phrases first;
+ *     if nothing real remains, it's silence, not a miss.
  */
 export function isCapabilityMiss(segments: DiarSegment[], text: string): boolean {
-	return segments.length === 0 && text.trim().length > 0;
+	return segments.length === 0 && stripHallucinatedLines(text).length > 0;
 }
 
 /**
@@ -191,6 +241,29 @@ export function transcribeAudio(
 export interface DiarizedResult {
 	text: string;
 	diarized: boolean;
+	/**
+	 * Why a non-diarized result came back, so the caller can react correctly:
+	 *   - "capability": the endpoint transcribed audio but ignored the timestamp
+	 *     request, so no future meeting can diarize either — invalidate the probe.
+	 *   - "error": a transient failure this run (flaky chunk, network). The next
+	 *     meeting may well succeed, so DON'T touch the cached probe.
+	 * Undefined when `diarized` is true.
+	 */
+	reason?: "capability" | "error";
+}
+
+/**
+ * Whether a non-diarized fallback should invalidate the cached timestamp probe.
+ *
+ * Only a genuine capability miss (the endpoint transcribed audio but ignored
+ * the timestamp request) means no future meeting can diarize, so the probe
+ * should be cleared. A transient error this run (a flaky chunk, a network blip)
+ * says nothing about the endpoint's capability, so the probe must stay put —
+ * otherwise one bad run silently disables speaker separation for every future
+ * meeting until the user manually re-checks (issue #61).
+ */
+export function shouldInvalidateProbe(result: DiarizedResult): boolean {
+	return !result.diarized && result.reason === "capability";
 }
 
 /**
@@ -207,10 +280,11 @@ export interface DiarizedResult {
  *   - the hallucination cleaner (postProcessMergedText / cleanText in the
  *     strategy), which likewise runs on merged text only.
  *
- * If a pass is a capability miss (no segments but non-blank text, i.e. the
- * endpoint ignored the timestamp request) this resolves with `diarized: false`
- * so the caller can fall back to transcribing the mixed-down file. A truly
- * silent stream (no segments, no text) is not a miss and we proceed.
+ * If a pass is a capability miss (no segments but real, non-hallucination
+ * text, i.e. the endpoint ignored the timestamp request) this resolves with
+ * `diarized: false` so the caller can fall back to transcribing the mixed-down
+ * file. A truly silent stream — no segments and either no text or only stock
+ * hallucination text — is not a miss and we proceed (see {@link isCapabilityMiss}).
  */
 export function transcribeDiarized(
 	app: App,
@@ -235,8 +309,12 @@ export function transcribeDiarized(
 		// silence, the room audio isn't), shifting their timestamps out of sync
 		// and shearing the shared timeline the merge relies on. We want the raw,
 		// aligned clocks.
+		const tAll = perfNow();
+		console.warn(
+			"[Meeting Copilot][transcribe] diarized: 2 serial passes (me, them)"
+		);
 		try {
-			const meResult = await runController(app, meFile, cfg, signal, "disabled", meProgress);
+			const meResult = await runController(app, meFile, cfg, signal, "disabled", meProgress, "me");
 			if (signal?.aborted) {
 				throw new DOMException("Transcription aborted", "AbortError");
 			}
@@ -247,17 +325,20 @@ export function transcribeDiarized(
 			// me + them + fallback 3 we'd pay by checking after both passes.
 			const meSegments = extractSegments(meResult);
 			if (isCapabilityMiss(meSegments, resultText(meResult))) {
-				return { text: "", diarized: false };
+				return { text: "", diarized: false, reason: "capability" };
 			}
 
-			const themResult = await runController(app, themFile, cfg, signal, "disabled", themProgress);
+			const themResult = await runController(app, themFile, cfg, signal, "disabled", themProgress, "them");
 			const themSegments = extractSegments(themResult);
 			if (isCapabilityMiss(themSegments, resultText(themResult))) {
-				return { text: "", diarized: false };
+				return { text: "", diarized: false, reason: "capability" };
 			}
 
 			// Both passes honored timestamps. A stream empty here is legitimately
 			// silent; mergeDiarized handles one empty side, and two give "".
+			console.warn(
+				`[Meeting Copilot][transcribe] diarized both passes done in ${elapsedSecs(tAll)}s`
+			);
 			return { text: mergeDiarized(meSegments, themSegments, windows), diarized: true };
 		} catch (error) {
 			if (isDiarizationCancelled(error, signal)) {
@@ -268,7 +349,7 @@ export function transcribeDiarized(
 			// be transcribed, so warn and let the caller fall back to it rather
 			// than letting the throw escape and leave no transcript written.
 			console.warn("Diarized transcription pass failed; falling back to mixed file", error);
-			return { text: "", diarized: false };
+			return { text: "", diarized: false, reason: "error" };
 		}
 	});
 }

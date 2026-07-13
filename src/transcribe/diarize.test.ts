@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { mergeDiarized, type DiarSegment, type SpeechWindows } from "./diarize";
+import {
+	mergeDiarized,
+	preferWindows,
+	type DiarSegment,
+	type SpeechWindows,
+} from "./diarize";
 
 function seg(text: string, start: number, end: number): DiarSegment {
 	return { text, start, end };
@@ -27,6 +32,100 @@ describe("mergeDiarized", () => {
 		expect(mergeDiarized(me, them)).toBe(
 			["Them: intro", "Me: question", "Them: answer"].join("\n")
 		);
+	});
+
+	describe("cross-talk (system-audio bleed) de-dup", () => {
+		it("drops a mic echo of an overlapping, near-identical them segment", () => {
+			// Speakers play the remote participant; that audio leaks into the mic
+			// and Whisper transcribes it again on the me stream at the same time.
+			const them = [seg("let us review the quarterly numbers", 10, 13)];
+			const me = [seg("let us review the quarterly numbers", 10, 13)];
+			expect(mergeDiarized(me, them)).toBe(
+				"Them: let us review the quarterly numbers"
+			);
+		});
+
+		it("drops the echo even with minor transcription differences", () => {
+			// Whisper adds a trailing word on the cleaner them stream; the word
+			// sets still overlap well above threshold.
+			const them = [seg("let us review the quarterly numbers now", 10, 13)];
+			const me = [seg("let us review the quarterly numbers", 10, 13)];
+			expect(mergeDiarized(me, them)).toBe(
+				"Them: let us review the quarterly numbers now"
+			);
+		});
+
+		it("keeps a short mic reaction over the other speaker", () => {
+			// Too few words to distinguish an echo from a genuine backchannel.
+			const them = [seg("and so the plan is to ship on friday", 10, 14)];
+			const me = [seg("yeah exactly", 11, 12)];
+			expect(mergeDiarized(me, them)).toBe(
+				["Them: and so the plan is to ship on friday", "Me: yeah exactly"].join(
+					"\n"
+				)
+			);
+		});
+
+		it("keeps genuinely different simultaneous speech", () => {
+			// Them starts slightly earlier so ordering is deterministic.
+			const them = [seg("i think we should postpone the launch", 10, 13)];
+			const me = [seg("no we already promised the customer", 10.5, 13)];
+			expect(mergeDiarized(me, them)).toBe(
+				[
+					"Them: i think we should postpone the launch",
+					"Me: no we already promised the customer",
+				].join("\n")
+			);
+		});
+
+		it("keeps an identical me line that does not overlap in time", () => {
+			// Same words but at a different moment — a real repeated phrase, not bleed.
+			const them = [seg("thanks for the update", 5, 7)];
+			const me = [seg("thanks for the update", 30, 32)];
+			expect(mergeDiarized(me, them)).toBe(
+				["Them: thanks for the update", "Me: thanks for the update"].join("\n")
+			);
+		});
+
+		it("keeps similar speech that only briefly overlaps (not a full echo)", () => {
+			// High word overlap (Jaccard 0.75) but the mic segment only clips the
+			// tail of the them segment (~11% of its duration), so it's kept — a
+			// real echo would sit almost entirely on top of its source.
+			const them = [seg("we should ship the release on friday", 10, 16)];
+			const me = [seg("we should ship the release on monday", 15.5, 20)];
+			expect(mergeDiarized(me, them)).toBe(
+				[
+					"Them: we should ship the release on friday",
+					"Me: we should ship the release on monday",
+				].join("\n")
+			);
+		});
+	});
+
+	describe("preferWindows", () => {
+		const local: SpeechWindows = { me: [[1, 2]], them: [[3, 4]] };
+		const rms: SpeechWindows = { me: [[5, 6]], them: [[7, 8]] };
+
+		it("returns the other when one is undefined", () => {
+			expect(preferWindows(undefined, rms)).toBe(rms);
+			expect(preferWindows(local, undefined)).toBe(local);
+			expect(preferWindows(undefined, undefined)).toBeUndefined();
+		});
+
+		it("keeps primary windows for a stream that detected speech", () => {
+			expect(preferWindows(local, rms)).toEqual({
+				me: [[1, 2]],
+				them: [[3, 4]],
+			});
+		});
+
+		it("falls back per stream when primary found no speech there", () => {
+			const primary: SpeechWindows = { me: [], them: [[3, 4]] };
+			expect(preferWindows(primary, rms)).toEqual({
+				me: [[5, 6]], // fell back to RMS for the empty mic stream
+				them: [[3, 4]], // kept local for the stream that had speech
+			});
+		});
 	});
 
 	it("collapses consecutive segments from the same speaker into one line", () => {
@@ -136,6 +235,94 @@ describe("mergeDiarized", () => {
 		it("keeps all segments when windows are omitted", () => {
 			const me = [seg("kept", 0, 1), seg("also kept", 100, 101)];
 			expect(mergeDiarized(me, [])).toBe("Me: kept also kept");
+		});
+	});
+
+	describe("silence-hallucination filtering", () => {
+		it("drops a whole-segment stock phrase before merging", () => {
+			const me = [seg("real point", 0, 2), seg("Thanks for watching!", 5, 6)];
+			expect(mergeDiarized(me, [])).toBe("Me: real point");
+		});
+
+		it("drops a bracketed non-speech token", () => {
+			const them = [seg("[Music]", 0, 4), seg("welcome all", 5, 7)];
+			expect(mergeDiarized([], them)).toBe("Them: welcome all");
+		});
+
+		it("drops a low-confidence silence segment via Whisper signals", () => {
+			// no_speech_prob high AND avg_logprob low => Whisper's own silence rule.
+			const me: DiarSegment[] = [
+				{ text: "you", start: 0, end: 1, noSpeechProb: 0.9, avgLogprob: -1.5 },
+				{ text: "on the topic of billing", start: 5, end: 8, noSpeechProb: 0.02, avgLogprob: -0.2 },
+			];
+			expect(mergeDiarized(me, [])).toBe("Me: on the topic of billing");
+		});
+
+		it("keeps a real segment even with high no_speech_prob when avg_logprob is healthy", () => {
+			const me: DiarSegment[] = [
+				{ text: "quick point here", start: 0, end: 2, noSpeechProb: 0.9, avgLogprob: -0.3 },
+			];
+			expect(mergeDiarized(me, [])).toBe("Me: quick point here");
+		});
+
+		it("drops looping gibberish (high compression ratio AND low logprob)", () => {
+			const me: DiarSegment[] = [
+				{ text: "la la la la la la", start: 0, end: 3, compressionRatio: 3.1, avgLogprob: -1.4 },
+				{ text: "actual content", start: 5, end: 7 },
+			];
+			expect(mergeDiarized(me, [])).toBe("Me: actual content");
+		});
+
+		it("does not DROP a confident high-compression segment, but collapses the loop", () => {
+			// A healthy logprob keeps isLowConfidenceHallucination from dropping
+			// the segment — but the text-level collapser still trims a runaway
+			// single-word loop to two (endpoint gives no way to tell it from a
+			// decoder loop, and in practice it always is one).
+			const me: DiarSegment[] = [
+				{ text: "yes yes yes yes", start: 0, end: 2, compressionRatio: 3.0, avgLogprob: -0.2 },
+			];
+			expect(mergeDiarized(me, [])).toBe("Me: yes yes");
+		});
+
+		it("collapses a high-compression loop even when no avg_logprob is present", () => {
+			// Compression alone can't DROP the segment (endpoints that omit
+			// avg_logprob must not lose real speech), but the collapser trims the
+			// loop — the gateway strips confidence signals, so this is the only
+			// backstop against "no no no no no …".
+			const me: DiarSegment[] = [
+				{ text: "no no no no no", start: 0, end: 2, compressionRatio: 3.5 },
+			];
+			expect(mergeDiarized(me, [])).toBe("Me: no no");
+		});
+
+		it("drops a stock phrase Whisper split across adjacent segments", () => {
+			// Neither half is a stock phrase alone, but folding the same-speaker
+			// segments reconstitutes "Thanks for watching" — the silent-stream case.
+			const me = [seg("Thanks", 30, 31), seg("for watching", 31, 32)];
+			expect(mergeDiarized(me, [])).toBe("");
+		});
+
+		it("drops another split outro family (see you / next time)", () => {
+			const them = [seg("See you", 40, 41), seg("next time", 41, 42)];
+			expect(mergeDiarized([], them)).toBe("");
+		});
+
+		it("keeps real speech that surrounds a split boundary", () => {
+			const them = [seg("Let me", 0, 1), seg("share my screen", 1, 2)];
+			expect(mergeDiarized([], them)).toBe("Them: Let me share my screen");
+		});
+
+		it("keeps a folded line where real content sits beside a split ghost tail", () => {
+			// Whole-line filter is conservative: when a ghost is split into
+			// fragments that each pass the per-segment filter and fold onto a line
+			// that also carries genuine content, the line is kept (real content
+			// present). A whole ghost segment would already be dropped upstream.
+			const me = [
+				seg("okay sounds good", 0, 2),
+				seg("thanks", 2, 3),
+				seg("for watching", 3, 4),
+			];
+			expect(mergeDiarized(me, [])).toBe("Me: okay sounds good thanks for watching");
 		});
 	});
 

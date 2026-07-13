@@ -1,6 +1,25 @@
 import esbuild from "esbuild";
 import process from "process";
 import { builtinModules } from 'node:module';
+import { copyFileSync, existsSync, rmSync } from "node:fs";
+
+// The local-VAD engine needs the fvad WASM binary sitting next to main.js at
+// runtime (the loader reads it from the plugin dir and hands the bytes to the
+// emscripten glue). The glue itself is bundled into main.js; only the binary
+// ships as a separate asset. Keep this in sync with deploy-local.mjs and
+// release.yml.
+const FVAD_WASM_SRC = "node_modules/@echogarden/fvad-wasm/fvad.wasm";
+const FVAD_WASM_DEST = "fvad.wasm";
+function copyFvadWasm() {
+	if (existsSync(FVAD_WASM_SRC)) {
+		copyFileSync(FVAD_WASM_SRC, FVAD_WASM_DEST);
+	} else {
+		// Missing binary is not fatal: diarization window detection falls back to
+		// the recorder's RMS speech.json (then to no filtering). Remove any stale
+		// copy so we don't ship a mismatched asset.
+		rmSync(FVAD_WASM_DEST, { force: true });
+	}
+}
 
 const banner =
 `/*
@@ -20,10 +39,6 @@ const context = await esbuild.context({
 	external: [
 		"obsidian",
 		"electron",
-		// Local-VAD WASM loader. Meeting Copilot uses server-side VAD, so this
-		// dynamic import is never reached at runtime; kept external so the
-		// vendored engine bundles without shipping the WASM asset.
-		"@echogarden/fvad-wasm",
 		"@codemirror/autocomplete",
 		"@codemirror/collab",
 		"@codemirror/commands",
@@ -47,7 +62,9 @@ const context = await esbuild.context({
 
 if (prod) {
 	await context.rebuild();
+	copyFvadWasm();
 	process.exit(0);
 } else {
+	copyFvadWasm();
 	await context.watch();
 }

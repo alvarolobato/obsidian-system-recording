@@ -13,7 +13,12 @@ export interface RowHandlers {
 	onCreateNote: (m: AgendaMeeting) => void;
 	onStop: () => void;
 	onOpenRecording: (m: AgendaMeeting) => void;
-	onTranscribe: (m: AgendaMeeting) => void;
+	/**
+	 * Re-transcribe the meeting's recording. `mode` picks whether to run
+	 * speaker separation ("diarized") or transcribe the single joint track
+	 * ("mixed"), independent of the plugin's default setting.
+	 */
+	onTranscribe: (m: AgendaMeeting, mode: "diarized" | "mixed") => void;
 	onEnrich: (m: AgendaMeeting) => void;
 	onOpenLink: ((m: AgendaMeeting) => void) | null;
 	onCopyLink: ((m: AgendaMeeting) => void) | null;
@@ -192,11 +197,21 @@ export function populateMeetingMenu(
 				.setIcon("file-check")
 				.onClick(() => handlers.onOpenRecording(meeting))
 		);
+		// Offer both re-transcribe paths regardless of the default setting: with
+		// speaker separation (me/them) and from the single joint track. The
+		// diarized option falls back to the joint track when no separate tracks
+		// were recorded.
 		menu.addItem((item) =>
 			item
-				.setTitle(a.actions.transcribe)
+				.setTitle(a.actions.transcribeDiarized)
 				.setIcon("captions")
-				.onClick(() => handlers.onTranscribe(meeting))
+				.onClick(() => handlers.onTranscribe(meeting, "diarized"))
+		);
+		menu.addItem((item) =>
+			item
+				.setTitle(a.actions.transcribeMixed)
+				.setIcon("captions")
+				.onClick(() => handlers.onTranscribe(meeting, "mixed"))
 		);
 	}
 

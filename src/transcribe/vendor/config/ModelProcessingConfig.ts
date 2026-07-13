@@ -139,8 +139,13 @@ export const DEFAULT_TRANSCRIPTION_CONFIG: TranscriptionConfig = {
 			chunkDurationSeconds: 25, // Target: 25 seconds (VAD adjusts within 20-30s)
 			maxFileSizeMB: 25, // OpenAI API file size limit: 25MB
 			maxDurationSeconds: Infinity, // Whisper has no duration limit (only file size limit)
-			maxConcurrentChunks: 2, // Process 2 chunks in parallel
-			rateLimitDelayMs: 3000, // 3 seconds between batches
+			// MEETING-COPILOT PATCH: 2 -> 6 concurrent, 3000 -> 1000ms delay.
+			// Our LiteLLM/whisper gateway runs ~2.5x real-time per chunk (~57s for
+			// a 25s chunk), so at 2-wide a 30-min meeting took ~1700s per pass (x2
+			// diarized). The gateway handles more parallelism fine; the added
+			// network-retry backoff absorbs any 429s. Big wall-clock win.
+			maxConcurrentChunks: 6, // Process 6 chunks in parallel
+			rateLimitDelayMs: 1000, // 1 second between batches
 			contextWindowSize: 0, // Whisper doesn't use context (uses timestamps instead)
 			vadChunking: {
 				overlapDurationSeconds: 5, // 5 seconds overlap between chunks
@@ -175,8 +180,13 @@ export const DEFAULT_TRANSCRIPTION_CONFIG: TranscriptionConfig = {
 			chunkDurationSeconds: 25, // Target: 25 seconds (VAD adjusts within 20-30s)
 			maxFileSizeMB: 25, // OpenAI API file size limit: 25MB
 			maxDurationSeconds: Infinity, // Whisper has no duration limit (only file size limit)
-			maxConcurrentChunks: 2, // Process 2 chunks in parallel
-			rateLimitDelayMs: 3000, // 3 seconds between batches
+			// MEETING-COPILOT PATCH: 2 -> 6 concurrent, 3000 -> 1000ms delay.
+			// Our LiteLLM/whisper gateway runs ~2.5x real-time per chunk (~57s for
+			// a 25s chunk), so at 2-wide a 30-min meeting took ~1700s per pass (x2
+			// diarized). The gateway handles more parallelism fine; the added
+			// network-retry backoff absorbs any 429s. Big wall-clock win.
+			maxConcurrentChunks: 6, // Process 6 chunks in parallel
+			rateLimitDelayMs: 1000, // 1 second between batches
 			contextWindowSize: 0, // Whisper doesn't use context (uses timestamps instead)
 			vadChunking: {
 				overlapDurationSeconds: 5, // 5 seconds overlap between chunks

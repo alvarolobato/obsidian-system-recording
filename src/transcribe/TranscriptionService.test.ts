@@ -3,6 +3,8 @@ import {
 	isCapabilityMiss,
 	isDiarizationCancelled,
 	normalizeEngineProgress,
+	shouldInvalidateProbe,
+	type DiarizedResult,
 } from "./TranscriptionService";
 import { initializeTranslations, t } from "./vendor/i18n/index";
 import en from "./vendor/i18n/translations/en";
@@ -34,6 +36,19 @@ describe("isCapabilityMiss", () => {
 		expect(isCapabilityMiss([], "   ")).toBe(false);
 	});
 
+	it("is false when the no-segment text is nothing but a hallucination (issue #61)", () => {
+		// A proxy that drops the segments array on silence must not be read as
+		// timestamp-incapable — that would disable speaker separation forever.
+		expect(isCapabilityMiss([], "Thanks for watching!")).toBe(false);
+		expect(isCapabilityMiss([], "Please Like Subscribe and Enable Notifications")).toBe(false);
+	});
+
+	it("is still a miss when real text is mixed with a hallucinated line", () => {
+		// Stripping only removes the stock line; the real line proves the
+		// endpoint transcribed audio but dropped timestamps => capability miss.
+		expect(isCapabilityMiss([], "Thanks for watching!\nhello there")).toBe(true);
+	});
+
 	it("is false once the pass produced any segment", () => {
 		expect(isCapabilityMiss([{ text: "hi", start: 0, end: 1 }], "hi")).toBe(false);
 	});
@@ -59,6 +74,33 @@ describe("isDiarizationCancelled", () => {
 		const controller = new AbortController();
 		expect(isDiarizationCancelled(new Error("partial result"), controller.signal)).toBe(false);
 		expect(isDiarizationCancelled(new Error("network blip"))).toBe(false);
+	});
+});
+
+describe("shouldInvalidateProbe", () => {
+	const result = (over: Partial<DiarizedResult>): DiarizedResult => ({
+		text: "",
+		diarized: false,
+		...over,
+	});
+
+	it("invalidates only on a genuine capability miss", () => {
+		expect(shouldInvalidateProbe(result({ reason: "capability" }))).toBe(true);
+	});
+
+	it("keeps the probe on a transient error (issue #61)", () => {
+		// A flaky chunk this run must not disable speaker separation forever.
+		expect(shouldInvalidateProbe(result({ reason: "error" }))).toBe(false);
+	});
+
+	it("keeps the probe on a successful diarized result", () => {
+		expect(
+			shouldInvalidateProbe({ text: "Me: hi", diarized: true })
+		).toBe(false);
+	});
+
+	it("keeps the probe when no reason was given", () => {
+		expect(shouldInvalidateProbe(result({}))).toBe(false);
 	});
 });
 
