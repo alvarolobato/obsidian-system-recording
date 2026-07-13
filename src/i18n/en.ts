@@ -32,8 +32,7 @@ export const en = {
 	detect: {
 		detected: (app: string) => `${app} meeting detected`,
 		recordPrompt: "Create note & record",
-		endedStopping: (app: string) =>
-			`${app} meeting ended — stopping recording`,
+		ended: (app: string) => `${app} meeting ended`,
 	},
 	notices: {
 		autoRecordEnabled: "Calendar auto-recording enabled",

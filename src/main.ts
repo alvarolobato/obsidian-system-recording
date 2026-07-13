@@ -170,6 +170,13 @@ export default class SystemRecordingPlugin extends Plugin {
 	 * overlapping / post-wake catch-up prompts don't clobber each other.
 	 */
 	private meetingNotices = new Map<string, Notice>();
+	/**
+	 * The current "meeting ended — stop recording?" prompt, if any. A recording
+	 * never stops on its own (unless the user opted into calendar auto-stop), so
+	 * the end of a meeting only offers to stop; we keep one reference to supersede
+	 * a stale prompt and to clear it once recording actually ends.
+	 */
+	private stopPromptNotice: Notice | null = null;
 	/** Resolvers waiting for the current recording to fully stop (back-to-back chaining). */
 	private stopWaiters: Array<() => void> = [];
 	/** True while a stopped recording is still being linked/handled in attachRecording. */
@@ -357,6 +364,8 @@ export default class SystemRecordingPlugin extends Plugin {
 		this.agendaEvents.clear();
 		for (const notice of this.meetingNotices.values()) notice.hide();
 		this.meetingNotices.clear();
+		this.stopPromptNotice?.hide();
+		this.stopPromptNotice = null;
     }
 
     async loadSettings() {
@@ -941,24 +950,39 @@ export default class SystemRecordingPlugin extends Plugin {
 	}
 
 	/**
-	 * When a detected meeting ends, stop the recording automatically — but only
-	 * for unplanned (ad-hoc/detected) recordings. Calendar-driven recordings are
-	 * left to the scheduler's own event-end handling.
+	 * When a detected meeting ends, never stop the recording on its own — offer
+	 * to stop instead, for both ad-hoc and scheduled recordings. (Auto-stop only
+	 * ever happens at a calendar event's own end when the user opted into it; see
+	 * {@link handleEventEnd}.)
 	 */
 	private onMeetingEnded(app: string): void {
 		// The detected meeting is over, so a pending "record?" prompt for it is
-		// moot — drop it whether or not we end up stopping a recording below.
+		// moot — drop it whether or not we go on to offer a stop below.
 		this.dismissMeetingNotice(`detect:${app}`);
 		// Ignore if detection was disabled meanwhile (an in-flight poll's onEnd
-		// must not auto-stop after the user opted out), and only stop once *all*
+		// must not prompt after the user opted out), and only act once *all*
 		// detected meetings have ended so one of several concurrent calls ending
-		// doesn't truncate a still-active recording.
+		// doesn't prompt while another is still live.
 		if (!this.detector || this.detector.activeCount() > 0) return;
-		if (!this.recorder.isRecording || !this.isAdhocRecording()) {
-			return;
-		}
-		new Notice(t().detect.endedStopping(app));
-		this.stopRecording();
+		if (!this.recorder.isRecording) return;
+		this.promptStopRecording(t().detect.ended(app));
+	}
+
+	/**
+	 * Offers to stop the current recording (a recording never stops on its own).
+	 * Supersedes any prior stop prompt so end-of-meeting triggers that overlap
+	 * (detected-meeting end + calendar event end) don't stack two notices.
+	 */
+	private promptStopRecording(message: string): void {
+		this.stopPromptNotice?.hide();
+		this.stopPromptNotice = actionNotice(
+			message,
+			t().event.stopRecordingAction,
+			() => {
+				this.stopPromptNotice = null;
+				this.stopRecording();
+			}
+		);
 	}
 
 	/**
@@ -1037,24 +1061,31 @@ export default class SystemRecordingPlugin extends Plugin {
 			)
 		);
 
-		// Native OS notification (visible while minimized / on another Space);
-		// clicking it focuses Obsidian and opens the rich prompt modal.
-		notifyOs(opts.title, `${opts.subtitle} · ${e.notificationHint}`, () => {
-			new MeetingPromptModal(this.app, {
-				title: opts.title,
-				subtitle: opts.subtitle,
-				hasLink: link !== null,
-				joinLabel: e.join,
-				recordLabel: e.record,
-				joinAndRecordLabel: e.joinAndRecord,
-				openNoteLabel: e.openNote,
-				dismissLabel: e.dismiss,
-				onJoin: onJoin ?? ((): void => undefined),
-				onRecord: opts.onRecord,
-				onJoinAndRecord: onJoinAndRecord ?? opts.onRecord,
-				onOpenNote: opts.onOpenNote ?? null,
-			}).open();
-		});
+		// Native OS notification (visible while minimized / on another Space).
+		// When the platform supports it the same actions render as real macOS
+		// buttons (first inline, rest under the notification's dropdown); its
+		// body click — and the no-actions fallback banner — opens the rich modal.
+		notifyOs(
+			opts.title,
+			`${opts.subtitle} · ${e.notificationHint}`,
+			() => {
+				new MeetingPromptModal(this.app, {
+					title: opts.title,
+					subtitle: opts.subtitle,
+					hasLink: link !== null,
+					joinLabel: e.join,
+					recordLabel: e.record,
+					joinAndRecordLabel: e.joinAndRecord,
+					openNoteLabel: e.openNote,
+					dismissLabel: e.dismiss,
+					onJoin: onJoin ?? ((): void => undefined),
+					onRecord: opts.onRecord,
+					onJoinAndRecord: onJoinAndRecord ?? opts.onRecord,
+					onOpenNote: opts.onOpenNote ?? null,
+				}).open();
+			},
+			actions.map((a) => ({ text: a.label, run: a.onClick }))
+		);
 	}
 
 	/** Prefix for calendar-event prompt keys (vs. `detect:` for detected meetings). */
@@ -1313,24 +1344,15 @@ export default class SystemRecordingPlugin extends Plugin {
 			return;
 		}
 
-		// Auto-stop when opted in, OR when the end boundary was crossed well in
-		// the past (e.g. the boundary fired late after a wake): an unattended
-		// recording that outlives its meeting by more than the grace window must
-		// not keep running, so stop it regardless of the setting.
-		const lateMs = Date.now() - event.end;
-		if (this.settings.calendarAutoStop || lateMs > GRACE_MS) {
+		// A recording never stops on its own — offer to stop — *unless* the user
+		// opted into calendar auto-stop, in which case the meeting's own end (even
+		// one crossed late after a wake) stops it.
+		if (this.settings.calendarAutoStop) {
 			new Notice(t().event.autoStopped(event.summary));
 			this.stopRecording();
 			return;
 		}
-
-		actionNotice(
-			t().event.ended(event.summary),
-			t().event.stopRecordingAction,
-			() => {
-				this.stopRecording();
-			}
-		);
+		this.promptStopRecording(t().event.ended(event.summary));
 	}
 
     // MARK: - Meeting agenda
@@ -2133,7 +2155,9 @@ export default class SystemRecordingPlugin extends Plugin {
             // A big real-time jump between 1 s ticks means the machine slept. If a
             // calendar recording's meeting is long over (its end + grace has
             // passed), the scheduler may have dropped the event while asleep, so
-            // stop here as a safety net rather than record indefinitely.
+            // handle it here as a safety net rather than record indefinitely:
+            // auto-stop when the user opted in, otherwise just offer to stop
+            // (a recording never stops on its own without that opt-in).
             const now = Date.now();
             if (
                 this.lastDurationTickAt !== null &&
@@ -2143,12 +2167,14 @@ export default class SystemRecordingPlugin extends Plugin {
                 this.recorder.isRecording
             ) {
                 this.lastDurationTickAt = now;
-                new Notice(
-                    t().event.autoStopped(
-                        this.currentMeetingNote?.basename ?? t().adhoc.defaultTitle
-                    )
-                );
-                this.stopRecording();
+                const title =
+                    this.currentMeetingNote?.basename ?? t().adhoc.defaultTitle;
+                if (this.settings.calendarAutoStop) {
+                    new Notice(t().event.autoStopped(title));
+                    this.stopRecording();
+                    return;
+                }
+                this.promptStopRecording(t().event.ended(title));
                 return;
             }
             this.lastDurationTickAt = now;
@@ -2184,6 +2210,10 @@ export default class SystemRecordingPlugin extends Plugin {
         this.currentMeetingNote = null;
         this.currentRecordingEventId = null;
         this.currentRecordingEventEnd = null;
+        // Recording has ended, so any "meeting ended — stop recording?" prompt is
+        // moot; drop it.
+        this.stopPromptNotice?.hide();
+        this.stopPromptNotice = null;
         this.agendaEvents.emit("changed", undefined);
         // A stop that ends without going through attachRecording (no file, or an
         // error) must still release any back-to-back waiter.
