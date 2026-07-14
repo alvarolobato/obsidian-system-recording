@@ -110,6 +110,9 @@ export const en = {
 		queued: (name: string) => `Queued: ${name}`,
 		queuedCount: (name: string, n: number) =>
 			`Transcribing ${name}… (+${n} queued)`,
+		queuePopoverTitle: "Transcription queue",
+		queueMore: (n: number) => `+${n} more`,
+		transcribingCount: (n: number) => `transcribing ${n}`,
 		transcriptAdded: "Transcript added",
 		transcribeFailed: "Transcription failed",
 		transcribeCancelled: "Transcription cancelled",

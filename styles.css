@@ -40,6 +40,92 @@
     }
 }
 
+/* Small transcription-count badge shown beside the recording timer. */
+.mc-rec-queue:not(:empty) {
+    margin-left: 6px;
+    font-size: var(--font-smallest);
+    color: var(--text-muted);
+    opacity: 0.9;
+}
+
+/* Hover popover listing the transcription queue, anchored above the status bar. */
+.mc-queue-popover {
+    position: fixed;
+    z-index: var(--layer-tooltip, 100);
+    max-width: 320px;
+    min-width: 200px;
+    padding: 8px 10px;
+    background-color: var(--background-secondary);
+    border: 1px solid var(--background-modifier-border);
+    border-radius: var(--radius-m);
+    box-shadow: var(--shadow-s);
+    font-size: var(--font-ui-smaller);
+    color: var(--text-normal);
+    /* Display-only: never steal hover from the status bar (avoids flicker). */
+    pointer-events: none;
+    opacity: 0;
+    transform: translateY(6px);
+    transition: opacity 120ms ease-out, transform 120ms ease-out;
+}
+
+.mc-queue-popover.is-visible {
+    opacity: 1;
+    transform: translateY(0);
+}
+
+.mc-queue-popover-title {
+    font-weight: var(--font-semibold);
+    color: var(--text-muted);
+    margin-bottom: 6px;
+}
+
+.mc-queue-popover-list {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.mc-queue-popover-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+}
+
+.mc-queue-popover-item.is-running {
+    color: var(--text-normal);
+}
+
+.mc-queue-popover-item:not(.is-running) {
+    color: var(--text-muted);
+}
+
+.mc-queue-popover-icon {
+    display: inline-flex;
+    align-items: center;
+    flex-shrink: 0;
+}
+
+.mc-queue-popover-icon svg {
+    width: 13px;
+    height: 13px;
+}
+
+.mc-queue-popover-item.is-running .mc-queue-popover-icon svg {
+    animation: mc-status-spin 1s linear infinite;
+}
+
+.mc-queue-popover-label {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.mc-queue-popover-more {
+    margin-top: 6px;
+    color: var(--text-faint);
+}
+
 .side-dock-ribbon-action.is-recording,
 .clickable-icon.is-recording {
     color: var(--text-error);
