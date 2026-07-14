@@ -21,6 +21,15 @@ describe("buildDashboardBlock", () => {
 		// every meeting in "Upcoming").
 		expect(block).not.toContain("AND start >= now");
 		expect(block).not.toContain("AND start < now");
+		// The same coercion must apply to the sort and the rendered Date column,
+		// otherwise a string `start` sorts/formats inconsistently against a date.
+		expect(block).toContain(
+			'dateformat(date(start), "yyyy-MM-dd HH:mm") AS Date'
+		);
+		expect(block).toContain("SORT date(start) ASC");
+		expect(block).toContain("SORT date(start) DESC");
+		expect(block).not.toContain("SORT start ASC");
+		expect(block).not.toContain("SORT start DESC");
 		expect(block).toContain(
 			"TASK WHERE !completed AND (file.frontmatter.event_id OR file.frontmatter.meeting_url)"
 		);
