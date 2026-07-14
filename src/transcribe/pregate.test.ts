@@ -83,9 +83,11 @@ describe("planPregatedChunks", () => {
 		for (const c of chunks) expect(c.end - c.start).toBeLessThanOrEqual(25);
 	});
 
-	it("folds a too-short split tail into the previous sub-chunk", () => {
-		// 0..46 region: [0,25],[20,45],[40,46]; the 6s... actually 46-40=6 >3.
-		// Use 0..42 so the tail (40..42 = 2s) is below minChunkDuration (3s).
+	it("keeps a trailing sub-chunk that isn't below minChunkDuration (runner config: overlap >= minChunk)", () => {
+		// step = maxDur - overlap = 20, so [0,42] splits into [0,25],[20,42].
+		// The tail spans 22s — far above minChunkDuration — so nothing folds and
+		// the natural split is returned. In the runner's config the last sub-chunk
+		// is always >= overlap (5s) >= minChunkDuration (5s), so this is the norm.
 		const chunks = planPregatedChunks([[0, 42]], 42, {
 			...OPTS,
 			padding: 0,
@@ -97,9 +99,12 @@ describe("planPregatedChunks", () => {
 		]);
 	});
 
-	it("never emits a chunk longer than maxChunkDuration, even when the tail fold would overshoot", () => {
-		// minChunk (8) > overlap (5): folding a short tail into its predecessor
-		// would exceed maxDur, so the planner must keep the small tail instead.
+	it("keeps a sub-minChunk tail rather than folding it into an over-length chunk", () => {
+		// minChunk (8) > overlap (5) makes the trailing chunk short enough to fold,
+		// but folding it into its (full maxDur) predecessor would exceed maxDur, so
+		// the guard keeps the small tail as its own chunk instead. This is why the
+		// fold body is defensive: a full-length predecessor + any real tail always
+		// overshoots, so we never violate the cap and never drop the tail's audio.
 		const chunks = planPregatedChunks([[0, 52]], 52, {
 			...OPTS,
 			padding: 0,
@@ -109,7 +114,7 @@ describe("planPregatedChunks", () => {
 		});
 		expect(chunks.length).toBeGreaterThan(0);
 		for (const c of chunks) expect(c.end - c.start).toBeLessThanOrEqual(10);
-		// Full coverage of the region is preserved.
+		// Full coverage of the region is preserved (no audio dropped by the guard).
 		expect(chunks[0]?.start).toBe(0);
 		expect(chunks[chunks.length - 1]?.end).toBe(52);
 	});
@@ -232,6 +237,15 @@ describe("plannedCoverageSeconds", () => {
 				{ start: 40, end: 41 },
 			])
 		).toBe(11);
+	});
+
+	it("merges touching ranges (a shared endpoint is counted once)", () => {
+		expect(
+			plannedCoverageSeconds([
+				{ start: 0, end: 10 },
+				{ start: 10, end: 20 },
+			])
+		).toBe(20);
 	});
 
 	it("handles unsorted input and is 0 for an empty plan", () => {

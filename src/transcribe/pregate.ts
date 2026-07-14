@@ -129,10 +129,12 @@ export function planPregatedChunks(
 			s = e - overlap;
 		}
 		// Fold a too-short trailing sub-chunk into its predecessor — but only
-		// when the merged chunk still fits maxChunkDuration, so the fold can
-		// never produce an over-length chunk (it can't for the runner's config,
-		// where minChunkDuration <= overlap, but a caller could pass otherwise;
-		// then we simply keep the small tail rather than violate the cap).
+		// when the merged chunk still fits maxChunkDuration. A full-length
+		// predecessor (every non-final sub-chunk is exactly maxDur) plus any real
+		// tail already exceeds maxDur, so in practice this guard keeps the small
+		// tail as its own chunk instead of folding: it never produces an
+		// over-length chunk and never drops the tail's audio. Kept as a defensive
+		// floor for tiny trailing requests should the split math ever change.
 		if (regionChunks.length >= 2) {
 			const last = regionChunks[regionChunks.length - 1];
 			const prev = regionChunks[regionChunks.length - 2];
