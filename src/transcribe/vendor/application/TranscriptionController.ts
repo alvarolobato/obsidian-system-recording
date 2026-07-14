@@ -501,7 +501,18 @@ export class TranscriptionController {
 		});
 
 		try {
-			await this.initialize();
+			// Lean init: pre-gated chunks bypass VAD preprocessing and the
+			// AudioPipeline entirely, so we only stand up the progress calculator
+			// (createProgressAdapter needs it) and report the preparation tick —
+			// no fvad, no chunking service, no decoded-audio pins.
+			this.progressCalculator = new SimpleProgressCalculator(this.settings.postProcessingEnabled);
+			if (this.progressTracker) {
+				const currentTask = this.progressTracker.getCurrentTask();
+				if (currentTask) {
+					const prepProgress = this.progressCalculator.preparationProgress();
+					this.progressTracker.updateProgress(currentTask.id, 0, t('modal.transcription.preparingAudio'), prepProgress);
+				}
+			}
 
 			const apiKey = this.getApiKey();
 			const { strategy } = this.createServiceAndStrategy(apiKey);

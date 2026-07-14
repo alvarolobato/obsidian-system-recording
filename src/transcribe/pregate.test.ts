@@ -96,6 +96,41 @@ describe("planPregatedChunks", () => {
 		]);
 	});
 
+	it("never emits a chunk longer than maxChunkDuration, even when the tail fold would overshoot", () => {
+		// minChunk (8) > overlap (5): folding a short tail into its predecessor
+		// would exceed maxDur, so the planner must keep the small tail instead.
+		const chunks = planPregatedChunks([[0, 52]], 52, {
+			...OPTS,
+			padding: 0,
+			maxChunkDuration: 10,
+			overlap: 5,
+			minChunkDuration: 8,
+		});
+		expect(chunks.length).toBeGreaterThan(0);
+		for (const c of chunks) expect(c.end - c.start).toBeLessThanOrEqual(10);
+		// Full coverage of the region is preserved.
+		expect(chunks[0]?.start).toBe(0);
+		expect(chunks[chunks.length - 1]?.end).toBe(52);
+	});
+
+	it("returns [] when every window is beyond the stream (all clamped away)", () => {
+		expect(planPregatedChunks([[200, 300]], 100, OPTS)).toEqual([]);
+	});
+
+	it("drops non-finite window endpoints", () => {
+		expect(
+			planPregatedChunks(
+				[
+					[Number.NaN, 5],
+					[10, Number.POSITIVE_INFINITY],
+					[20, 21],
+				],
+				100,
+				{ ...OPTS, padding: 0 }
+			)
+		).toEqual([{ start: 20, end: 21 }]);
+	});
+
 	it("keeps the advance positive even if overlap >= maxChunkDuration", () => {
 		const chunks = planPregatedChunks([[0, 60]], 60, {
 			...OPTS,

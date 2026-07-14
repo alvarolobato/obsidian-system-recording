@@ -306,6 +306,12 @@ const PREGATE_MIN_CHUNK_SECONDS = 5.0;
  * quiet-but-real speaker or a missing speech.json must never be silently
  * skipped), when nothing survives planning, or when decoding fails. This
  * mirrors the existing "empty windows = keep all" safety in the merge.
+ *
+ * Not a new drop path: {@link mergeDiarized} already discards segments that
+ * fall outside these same windows, and we upload a *superset* of them (padded,
+ * with sub-`mergeGap` gaps bridged), so pre-gating drops nothing the existing
+ * post-filter merge wouldn't have dropped anyway — it just avoids paying to
+ * transcribe the silence first.
  */
 async function buildPregatedChunks(
 	app: App,

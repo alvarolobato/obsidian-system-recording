@@ -80,8 +80,10 @@ export function planPregatedChunks(
 	const mergeGap = Math.max(0, opts.mergeGap);
 
 	// 1. Pad + clamp to the stream, dropping degenerate/out-of-range windows.
-	//    Guard against a reversed pair by ordering the endpoints first.
+	//    Guard against a reversed pair by ordering the endpoints first, and
+	//    against non-finite endpoints (NaN/Infinity) before they poison the math.
 	const padded = windows
+		.filter(([a, b]) => Number.isFinite(a) && Number.isFinite(b))
 		.map(([a, b]) => {
 			const lo = Math.min(a, b);
 			const hi = Math.max(a, b);
@@ -126,11 +128,20 @@ export function planPregatedChunks(
 			if (e >= re) break;
 			s = e - overlap;
 		}
-		// Fold a too-short trailing sub-chunk into its predecessor.
+		// Fold a too-short trailing sub-chunk into its predecessor — but only
+		// when the merged chunk still fits maxChunkDuration, so the fold can
+		// never produce an over-length chunk (it can't for the runner's config,
+		// where minChunkDuration <= overlap, but a caller could pass otherwise;
+		// then we simply keep the small tail rather than violate the cap).
 		if (regionChunks.length >= 2) {
 			const last = regionChunks[regionChunks.length - 1];
 			const prev = regionChunks[regionChunks.length - 2];
-			if (last && prev && last.end - last.start < minChunk) {
+			if (
+				last &&
+				prev &&
+				last.end - last.start < minChunk &&
+				last.end - prev.start <= maxDur
+			) {
 				prev.end = last.end;
 				regionChunks.pop();
 			}
