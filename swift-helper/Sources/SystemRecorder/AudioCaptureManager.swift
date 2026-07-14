@@ -1,6 +1,8 @@
 import Foundation
 import ScreenCaptureKit
 import AVFoundation
+import AudioToolbox
+import CoreAudio
 import CoreMedia
 
 @available(macOS 13.0, *)
@@ -16,6 +18,13 @@ final class AudioCaptureManager: NSObject, SCStreamDelegate, @unchecked Sendable
     /// Non-fatal capture warnings (e.g. a device-change restart that failed).
     /// The recording keeps going; the plugin surfaces these for visibility.
     var onWarning: ((String) -> Void)?
+
+    /// Stable UID of the input device to record from. Nil/empty = the system
+    /// default. Set before startCapture(); a UID that no longer resolves (the
+    /// device was unplugged) falls back to the default with a warning. Read on
+    /// every (re)start of the mic engine, so a device that returns after a
+    /// config change is picked back up.
+    var preferredInputDeviceUID: String?
 
     // Recovery bookkeeping. Both capture paths bind to whatever audio devices
     // exist at start; an app like Zoom launching *after* we start switches the
@@ -199,6 +208,10 @@ final class AudioCaptureManager: NSObject, SCStreamDelegate, @unchecked Sendable
     private func startMicEngine() throws {
         let engine = AVAudioEngine()
         let inputNode = engine.inputNode
+        // Point the input node at the chosen device before we read its format
+        // and install the tap; a missing device leaves the node on the system
+        // default (and warns).
+        applyPreferredInputDevice(to: inputNode)
         let format = inputNode.outputFormat(forBus: 0)
         inputNode.installTap(onBus: 0, bufferSize: 4096, format: format) {
             [weak self] buffer, time in
@@ -207,6 +220,35 @@ final class AudioCaptureManager: NSObject, SCStreamDelegate, @unchecked Sendable
         engine.prepare()
         try engine.start()
         self.audioEngine = engine
+    }
+
+    /// Bind the mic engine's input node to `preferredInputDeviceUID` via the
+    /// underlying AUHAL's current-device property. No-op for the system default.
+    /// Any failure (device gone, property rejected) is non-fatal: the node
+    /// stays on the default and we warn, so a recording still happens.
+    private func applyPreferredInputDevice(to inputNode: AVAudioInputNode) {
+        guard let uid = preferredInputDeviceUID, !uid.isEmpty else { return }
+        guard let deviceID = AudioDevices.deviceID(forUID: uid) else {
+            onWarning?(
+                "Selected microphone is unavailable; recording with the system default."
+            )
+            return
+        }
+        guard let audioUnit = inputNode.audioUnit else { return }
+        var device = deviceID
+        let status = AudioUnitSetProperty(
+            audioUnit,
+            kAudioOutputUnitProperty_CurrentDevice,
+            kAudioUnitScope_Global,
+            0,
+            &device,
+            UInt32(MemoryLayout<AudioDeviceID>.size)
+        )
+        if status != noErr {
+            onWarning?(
+                "Could not select the chosen microphone (error \(status)); recording with the system default."
+            )
+        }
     }
 
     private func teardownMicEngine() {

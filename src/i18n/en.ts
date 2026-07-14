@@ -43,6 +43,8 @@ export const en = {
 		alreadyRecording: "Already recording",
 		macOnly: "System recording is only supported on macOS",
 		downloadingHelper: "Downloading recorder helper…",
+		micUnavailable: (device: string) =>
+			`Microphone "${device}" isn't available — recording with the system default.`,
 		recordingStarted: "Recording started",
 		notRecording: "Not recording",
 		stoppingRecording: "Stopping recording...",
@@ -207,6 +209,13 @@ export const en = {
 		compressedRecordings: {
 			name: "Compressed recordings (m4a)",
 			desc: "Save recordings as AAC .m4a (~28 MB/hour) instead of WAV (~173 MB/hour). Same mono 24 kHz audio either way; transcription handles both. Only affects new recordings.",
+		},
+		microphone: {
+			name: "Microphone",
+			desc: "Input device for the 'Me' channel. Use the refresh button to list connected microphones. If the chosen device isn't available when recording starts, the system default is used.",
+			systemDefault: "System default",
+			refresh: "Refresh device list",
+			unavailableOption: (device: string) => `${device} (unavailable)`,
 		},
 		oneOffFolderTemplate: {
 			name: "One-off meetings folder",

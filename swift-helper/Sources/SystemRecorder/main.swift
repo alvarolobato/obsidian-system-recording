@@ -3,7 +3,7 @@ import AVFoundation
 
 // MARK: - Argument parsing
 
-let usage = "Usage: system-recorder start --output <path> --stop-file <path> [--split] [--format \(RecordingFormat.usageList)]"
+let usage = "Usage: system-recorder start --output <path> --stop-file <path> [--split] [--format \(RecordingFormat.usageList)] [--input-device <uid>]\n       system-recorder list-devices"
 
 // MARK: - JSON output helper
 
@@ -23,6 +23,15 @@ func fail(_ message: String) -> Never {
 }
 
 let args = CommandLine.arguments
+
+// `list-devices`: enumerate input (microphone) devices as JSON for the
+// settings picker, then exit. No capture, no permissions needed.
+if args.count >= 2, args[1] == "list-devices" {
+    let devices = AudioDevices.inputDevices().map { ["uid": $0.uid, "name": $0.name] }
+    emitJSON(["devices": devices])
+    exit(0)
+}
+
 guard args.count >= 6,
       args[1] == "start",
       args[2] == "--output",
@@ -34,9 +43,13 @@ let finalOutputPath = args[3]
 let stopFilePath = args[5]
 
 // Optional flags after the required args. All absent = mono 24 kHz WAV, no
-// sidecars.
+// sidecars, system-default input device.
 var split = false
 var format = RecordingFormat.wav
+// Record from a specific input device (by stable UID) instead of the system
+// default. Empty/nil = system default; a UID that no longer resolves falls
+// back to the default with a warning (see AudioCaptureManager).
+var inputDeviceUID: String?
 var argIndex = 6
 while argIndex < args.count {
     switch args[argIndex] {
@@ -49,6 +62,11 @@ while argIndex < args.count {
             fail(usage)
         }
         format = parsed
+        argIndex += 2
+    case "--input-device":
+        guard argIndex + 1 < args.count else { fail(usage) }
+        let uid = args[argIndex + 1]
+        inputDeviceUID = uid.isEmpty ? nil : uid
         argIndex += 2
     default:
         fail(usage)
@@ -98,6 +116,7 @@ func moveReplacing(from source: URL, to destination: URL) throws {
 
 if #available(macOS 13.0, *) {
     let captureManager = AudioCaptureManager()
+    captureManager.preferredInputDeviceUID = inputDeviceUID
     let mixer: AudioMixer
 
     do {

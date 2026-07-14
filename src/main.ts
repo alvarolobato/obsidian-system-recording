@@ -8,10 +8,17 @@ import {
     SystemRecordingSettings,
     SystemRecordingSettingTab,
 } from "./settings";
-import { Recorder, RecorderStatus, RecordingFormat } from "./recorder";
+import {
+    Recorder,
+    RecorderStatus,
+    RecordingFormat,
+    listInputDevices,
+    type InputDevice,
+} from "./recorder";
 import { BinaryProvisioner } from "./binary";
 import { nodeDeps, resolveBinaryPath } from "./binary-runtime";
 import * as path from "path";
+import * as fs from "fs";
 import { GoogleOAuth, type StoredTokens } from "./auth/googleOAuth";
 import { listEvents } from "./calendar/googleCalendar";
 import { parseKeywords } from "./calendar/eventFilter";
@@ -747,9 +754,11 @@ export default class SystemRecordingPlugin extends Plugin {
             // new recording attempt is a deliberate user action that should get
             // one fresh chance to deep-link to System Settings.
             this.screenSettingsOpened = false;
+            const inputDeviceUid = await this.resolveInputDeviceUid(binaryPath);
             this.recorder.start(binaryPath, absolutePath, {
                 split: this.shouldSeparateSpeakers(),
                 format,
+                inputDeviceUid,
             });
             this.recordingStartTime = Date.now();
             this.startDurationTimer();
@@ -2180,6 +2189,58 @@ export default class SystemRecordingPlugin extends Plugin {
         if (pending > 0) {
             new Notice(t().notices.recordingsPending(pending), 10000);
         }
+    }
+
+    /**
+     * Enumerate input (microphone) devices via the recorder helper, for the
+     * settings picker. Ensures the helper binary is present first (downloading
+     * it unless `allowDownload` is false); returns [] when it can't be made
+     * available or on any enumeration failure. macOS-only in practice.
+     */
+    async listInputDevices(opts?: {
+        allowDownload?: boolean;
+    }): Promise<InputDevice[]> {
+        if (!Platform.isMacOS) return [];
+        const binaryPath = resolveBinaryPath(this);
+        if (opts?.allowDownload === false) {
+            // Best-effort: only list if the binary is already on disk; never
+            // trigger a download just to populate the dropdown on open.
+            if (!fs.existsSync(binaryPath)) return [];
+        } else {
+            try {
+                await this.provisioner.ensure(
+                    binaryPath,
+                    this.manifest.version,
+                    () => new Notice(t().notices.downloadingHelper)
+                );
+            } catch (e) {
+                new Notice(e instanceof Error ? e.message : String(e));
+                return [];
+            }
+        }
+        return listInputDevices(binaryPath);
+    }
+
+    /**
+     * Resolve the configured microphone to a device UID to record from, or
+     * undefined for the system default. When a specific device is chosen but
+     * isn't currently present (e.g. a Bluetooth mic that's off/unpaired), warn
+     * with an auto-dismissing notice and fall back to the default so the
+     * recording still starts. A failed enumeration (empty) isn't treated as
+     * "gone": the selection is passed through and the helper falls back + warns
+     * if the device really is missing.
+     */
+    private async resolveInputDeviceUid(
+        binaryPath: string
+    ): Promise<string | undefined> {
+        const uid = this.settings.micDeviceUid;
+        if (!uid) return undefined;
+        const devices = await listInputDevices(binaryPath);
+        if (devices.length === 0) return uid;
+        if (devices.some((d) => d.uid === uid)) return uid;
+        const label = this.settings.micDeviceLabel || uid;
+        new Notice(t().notices.micUnavailable(label), 6000);
+        return undefined;
     }
 
     private openMeetingLink(url: string): void {

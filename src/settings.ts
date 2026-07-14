@@ -6,6 +6,7 @@ import {
 	Setting,
 } from "obsidian";
 import type SystemRecordingPlugin from "./main";
+import type { InputDevice } from "./recorder";
 import type { StoredTokens } from "./auth/googleOAuth";
 import {
 	DEFAULT_NOTE_TEMPLATE,
@@ -50,6 +51,18 @@ export interface SystemRecordingSettings {
 	 * the helper encodes at stop.
 	 */
 	compressedRecordings: boolean;
+	/**
+	 * Stable UID of the input device (microphone) to record the "Me" channel
+	 * from. Empty = the system default input. A UID that no longer resolves at
+	 * record time falls back to the default with a notice.
+	 */
+	micDeviceUid: string;
+	/**
+	 * Friendly name of {@link micDeviceUid}, remembered so the "device
+	 * unavailable" notice can name it even after the device is unplugged (the
+	 * helper only ever sees the UID).
+	 */
+	micDeviceLabel: string;
 	noteTitlePattern: string;
 	noteTemplate: string;
 	retentionDays: number;
@@ -129,6 +142,8 @@ export const DEFAULT_SETTINGS: SystemRecordingSettings = {
 	adhocFolder: "Meetings/Ad-hoc",
 	recordingSubfolder: "Recordings",
 	compressedRecordings: true,
+	micDeviceUid: "",
+	micDeviceLabel: "",
 	noteTitlePattern: DEFAULT_TITLE_PATTERN,
 	noteTemplate: DEFAULT_NOTE_TEMPLATE,
 	retentionDays: 90,
@@ -252,6 +267,10 @@ export class SystemRecordingSettingTab extends PluginSettingTab {
     private sttTimestampBadgeEl: HTMLElement | null = null;
     /** The engine-family dropdown, so a model change can update its value in place. */
     private sttEngineDropdown: DropdownComponent | null = null;
+    /** Input devices last enumerated from the helper, for the Microphone picker. Empty until listed. */
+    private inputDevices: InputDevice[] = [];
+    /** True while a device enumeration is in flight, so the button can show progress and re-entry is blocked. */
+    private listingDevices = false;
 
     constructor(app: App, plugin: SystemRecordingPlugin) {
         super(app, plugin);
@@ -902,6 +921,8 @@ export class SystemRecordingSettingTab extends PluginSettingTab {
 					})
 			);
 
+		this.addMicrophoneSetting(containerEl);
+
 		this.addFolderField(
 			new Setting(containerEl)
 				.setName(s.settings.oneOffFolderTemplate.name)
@@ -1249,6 +1270,96 @@ export class SystemRecordingSettingTab extends PluginSettingTab {
      * default value, and an empty/blank edit reverting to that default rather
      * than being saved as "".
      */
+    /**
+     * Microphone (input device) picker with a refresh button. The device list
+     * is enumerated from the recorder helper's `list-devices`; "System default"
+     * is always offered, and a saved-but-currently-absent device stays visible
+     * (labelled unavailable) so it doesn't silently reset. Repaints its own row
+     * in place so refreshing doesn't scroll-jump the tab.
+     */
+    private addMicrophoneSetting(containerEl: HTMLElement): void {
+        const s = t();
+        const setting = new Setting(containerEl)
+            .setName(s.settings.microphone.name)
+            .setDesc(s.settings.microphone.desc);
+
+        const paint = (): void => {
+            setting.controlEl.empty();
+            const current = this.plugin.settings.micDeviceUid;
+            const options: Record<string, string> = {
+                "": s.settings.microphone.systemDefault,
+            };
+            for (const d of this.inputDevices) options[d.uid] = d.name;
+            // Keep a stored device that isn't in the current list visible and
+            // selectable (marked unavailable) rather than snapping to default.
+            if (current && !options[current]) {
+                options[current] = s.settings.microphone.unavailableOption(
+                    this.plugin.settings.micDeviceLabel || current
+                );
+            }
+            setting.addDropdown((dd) => {
+                dd.selectEl.addClass("meeting-copilot-model-dropdown");
+                dd.addOptions(options)
+                    .setValue(current)
+                    .onChange(async (value) => {
+                        this.plugin.settings.micDeviceUid = value;
+                        this.plugin.settings.micDeviceLabel =
+                            this.inputDevices.find((d) => d.uid === value)
+                                ?.name ?? "";
+                        await this.plugin.saveSettings();
+                    });
+            });
+            setting.addExtraButton((btn) =>
+                btn
+                    .setIcon("refresh-cw")
+                    .setTooltip(s.settings.microphone.refresh)
+                    .setDisabled(this.listingDevices)
+                    .onClick(() => void this.refreshInputDevices(paint))
+            );
+        };
+
+        paint();
+        // Best-effort populate on open, but never trigger a helper download for
+        // it — the refresh button force-ensures the binary when the user asks.
+        if (this.inputDevices.length === 0 && !this.listingDevices) {
+            void this.refreshInputDevices(paint, { allowDownload: false });
+        }
+    }
+
+    /**
+     * Enumerate input devices from the helper and repaint the picker. `repaint`
+     * is called at start (to disable the button / show it's working) and on
+     * completion. A best-effort load ({ allowDownload: false }) that comes back
+     * empty because the binary isn't present yet leaves any existing list
+     * intact; an explicit refresh replaces it.
+     */
+    private async refreshInputDevices(
+        repaint: () => void,
+        opts?: { allowDownload?: boolean }
+    ): Promise<void> {
+        if (this.listingDevices) return;
+        this.listingDevices = true;
+        repaint();
+        try {
+            const devices = await this.plugin.listInputDevices(opts);
+            const explicit = opts?.allowDownload !== false;
+            if (devices.length > 0 || explicit) {
+                this.inputDevices = devices;
+            }
+            // Refresh the remembered label for the current selection if we can
+            // see it now (a device rename, or first successful enumeration).
+            const current = this.plugin.settings.micDeviceUid;
+            const match = this.inputDevices.find((d) => d.uid === current);
+            if (match && match.name !== this.plugin.settings.micDeviceLabel) {
+                this.plugin.settings.micDeviceLabel = match.name;
+                await this.plugin.saveSettings();
+            }
+        } finally {
+            this.listingDevices = false;
+            repaint();
+        }
+    }
+
     private addFolderField(
         setting: Setting,
         current: string,

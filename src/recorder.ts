@@ -19,6 +19,92 @@ export interface RecorderStartOptions {
     split?: boolean;
     /** Output container/codec; the helper defaults to "wav" when omitted. */
     format?: RecordingFormat;
+    /**
+     * Stable UID of the input device to record from. Omitted/empty = the
+     * system default input. A UID that no longer resolves at start time falls
+     * back to the default (the helper emits a non-fatal "warning" status).
+     */
+    inputDeviceUid?: string;
+}
+
+/** An input (microphone) device the user can pick, from the helper's `list-devices`. */
+export interface InputDevice {
+    /** Stable CoreAudio UID; persists across reboots/reconnects. */
+    uid: string;
+    name: string;
+}
+
+/**
+ * Enumerate the machine's input (microphone) devices by invoking the helper's
+ * `list-devices` subcommand. Resolves to `[]` on any failure (missing binary,
+ * bad output, timeout) so the caller can just fall back to the system default.
+ * macOS-only in practice; the helper is only shipped there.
+ */
+export function listInputDevices(binaryPath: string): Promise<InputDevice[]> {
+    return new Promise((resolve) => {
+        let settled = false;
+        const done = (devices: InputDevice[]): void => {
+            if (settled) return;
+            settled = true;
+            resolve(devices);
+        };
+        let proc: ChildProcess;
+        try {
+            proc = spawn(binaryPath, ["list-devices"], {
+                stdio: ["ignore", "pipe", "ignore"],
+            });
+        } catch (e) {
+            log("list-devices spawn threw", { message: String(e) });
+            done([]);
+            return;
+        }
+        // A hung helper must not block the settings UI forever.
+        const timer = setTimeout(() => {
+            proc.kill();
+            log("list-devices timed out");
+            done([]);
+        }, 5000);
+        let out = "";
+        proc.stdout?.on("data", (d: string | Uint8Array) => {
+            out += d.toString();
+        });
+        proc.on("error", (err: Error) => {
+            clearTimeout(timer);
+            log("list-devices error", { message: err.message });
+            done([]);
+        });
+        proc.on("close", () => {
+            clearTimeout(timer);
+            done(parseDeviceList(out));
+        });
+    });
+}
+
+/** Parse the helper's `{ "devices": [{uid,name}, …] }` output, tolerating noise. Exported for testing. */
+export function parseDeviceList(stdout: string): InputDevice[] {
+    for (const line of stdout.split("\n")) {
+        const trimmed = line.trim();
+        if (!trimmed.startsWith("{")) continue;
+        try {
+            const parsed = JSON.parse(trimmed) as { devices?: unknown };
+            if (!Array.isArray(parsed.devices)) continue;
+            return parsed.devices.flatMap((d): InputDevice[] => {
+                if (
+                    d &&
+                    typeof d === "object" &&
+                    typeof (d as InputDevice).uid === "string" &&
+                    typeof (d as InputDevice).name === "string"
+                ) {
+                    const dev = d as InputDevice;
+                    return dev.uid ? [{ uid: dev.uid, name: dev.name }] : [];
+                }
+                return [];
+            });
+        } catch {
+            // Not the JSON line; keep scanning.
+        }
+    }
+    return [];
 }
 
 /**
@@ -72,6 +158,9 @@ export class Recorder {
         // --split at args[6] and ignores the rest.
         if (opts?.split) spawnArgs.push("--split");
         if (opts?.format) spawnArgs.push("--format", opts.format);
+        if (opts?.inputDeviceUid) {
+            spawnArgs.push("--input-device", opts.inputDeviceUid);
+        }
 
         log("spawning helper", {
             binaryPath,
