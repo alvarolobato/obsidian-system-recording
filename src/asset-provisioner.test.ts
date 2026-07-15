@@ -40,8 +40,11 @@ describe("AssetProvisioner", () => {
 		const downloadToFile = vi.fn(async () => undefined);
 		const deps = makeDeps({
 			fileExists: async () => true,
-			fileSize: async () => {
-				throw new Error("ENOENT");
+			// Only the existing dest's stat fails; the freshly downloaded temp
+			// stats fine so the post-download size check passes.
+			fileSize: async (p) => {
+				if (p === DEST) throw new Error("ENOENT");
+				return SIZE;
 			},
 			downloadToFile,
 			sha256File: async () => SHA,
@@ -56,7 +59,8 @@ describe("AssetProvisioner", () => {
 		const downloadToFile = vi.fn(async () => undefined);
 		const deps = makeDeps({
 			fileExists: async () => true,
-			fileSize: async () => SIZE - 1,
+			// The stale dest is the wrong size; the re-downloaded temp is right.
+			fileSize: async (p) => (p === DEST ? SIZE - 1 : SIZE),
 			downloadToFile,
 			sha256File: async () => SHA,
 		});
@@ -87,6 +91,24 @@ describe("AssetProvisioner", () => {
 			`hash:${DEST}.tmp`,
 			`rename:${DEST}.tmp->${DEST}`,
 		]);
+	});
+
+	it("rejects with an 'incomplete' error (skipping the hash) when the temp file is truncated", async () => {
+		const sha256File = vi.fn(async () => SHA);
+		const unlink = vi.fn(async () => undefined);
+		const deps = makeDeps({
+			fileExists: async () => false,
+			// Post-download the temp file is the wrong (short) size.
+			fileSize: async () => SIZE - 10,
+			sha256File,
+			unlink,
+		});
+		await expect(
+			new AssetProvisioner(deps).ensure(DEST, URL, SHA, SIZE)
+		).rejects.toThrow(/incomplete/i);
+		// A known-wrong-size file is never hashed, and the temp is cleaned up.
+		expect(sha256File).not.toHaveBeenCalled();
+		expect(unlink).toHaveBeenCalledWith(`${DEST}.tmp`);
 	});
 
 	it("deletes the temp file and throws when the download fails verification", async () => {

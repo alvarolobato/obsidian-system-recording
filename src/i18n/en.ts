@@ -452,6 +452,7 @@ export const en = {
 		sttLanguage: {
 			name: "Language",
 			desc: "ISO 639-1 code (e.g. en, ja, ko, zh, es, de, fr) or 'auto' to detect. Use the two-letter code — full names like 'Spanish' will cause a 400 error from the API.",
+			placeholder: "Auto-detect",
 		},
 		dictionaryCorrection: {
 			name: "Custom dictionary correction",

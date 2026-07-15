@@ -1083,7 +1083,7 @@ export class SystemRecordingSettingTab extends PluginSettingTab {
             .setDesc(s.settings.sttLanguage.desc)
             .addText((text) =>
                 text
-                    .setPlaceholder("Auto-detect")
+                    .setPlaceholder(s.settings.sttLanguage.placeholder)
                     .setValue(this.plugin.settings.sttLanguage)
                     .onChange(async (value) => {
                         this.plugin.settings.sttLanguage =

@@ -206,6 +206,12 @@ export class AssetProvisioner {
 		}
 
 		try {
+			// A short read (network cut mid-stream) leaves a truncated temp file.
+			// Catch that by size first — it's a clearer error than a hash
+			// mismatch and skips hashing a file already known to be wrong.
+			if ((await this.deps.fileSize(tmp)) !== expectedSize) {
+				throw new Error("Model download was incomplete; please try again.");
+			}
 			if ((await this.deps.sha256File(tmp)) !== sha256) {
 				throw new Error("Model failed verification.");
 			}
