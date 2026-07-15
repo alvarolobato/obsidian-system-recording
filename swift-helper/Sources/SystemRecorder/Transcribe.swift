@@ -231,10 +231,19 @@ private func runJob(
 
     // `language` must stay valid for the whole whisper_full call; withCString
     // keeps the buffer alive across it. "auto" triggers language detection.
-    let rc: Int32 = language.withCString { langPtr in
-        params.language = langPtr
-        return samples.withUnsafeBufferPointer { buf in
-            whisper_full(ctx, params, buf.baseAddress, Int32(buf.count))
+    //
+    // withExtendedLifetime(reporter) is load-bearing: `reporter` is handed to
+    // whisper only as an unretained opaque pointer (progress_callback_user_data),
+    // which ARC doesn't see as a reference — in an optimized build it could free
+    // `reporter` right after `passUnretained` and the progress callback would
+    // dereference a dangling pointer. Pinning its lifetime across whisper_full
+    // keeps the callback's userData valid.
+    let rc: Int32 = withExtendedLifetime(reporter) {
+        language.withCString { langPtr in
+            params.language = langPtr
+            return samples.withUnsafeBufferPointer { buf in
+                whisper_full(ctx, params, buf.baseAddress, Int32(buf.count))
+            }
         }
     }
 
