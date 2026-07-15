@@ -111,7 +111,10 @@ if (deployBinaryFrom) {
 	}
 	const frameworkDest = path.join(DEST, "whisper.framework");
 	fs.rmSync(frameworkDest, { recursive: true, force: true });
-	fs.cpSync(frameworkSrc, frameworkDest, { recursive: true });
+	// dereference:false (the default, made explicit) is load-bearing: the
+	// framework's Versions/Current -> A symlink must survive the copy or dyld
+	// can't resolve @rpath/whisper.framework/Versions/Current/whisper.
+	fs.cpSync(frameworkSrc, frameworkDest, { recursive: true, dereference: false });
 }
 
 console.log(`deploy-local: deployed to ${DEST}`);
