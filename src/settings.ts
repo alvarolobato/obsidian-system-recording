@@ -68,6 +68,8 @@ export interface SystemRecordingSettings {
 	retentionDays: number;
 	insertTranscript: boolean;
 	autoTranscribe: boolean;
+	/** Auto-discard a just-stopped recording that had no speech (needs auto-transcribe). */
+	discardSilentRecordings: boolean;
 	actionItemsAsTasks: boolean;
 	googleClientId: string;
 	googleClientSecret: string;
@@ -149,6 +151,7 @@ export const DEFAULT_SETTINGS: SystemRecordingSettings = {
 	retentionDays: 90,
 	insertTranscript: true,
 	autoTranscribe: true,
+	discardSilentRecordings: true,
 	actionItemsAsTasks: true,
 	googleClientId: "",
 	googleClientSecret: "",
@@ -813,6 +816,18 @@ export class SystemRecordingSettingTab extends PluginSettingTab {
 					.setValue(this.plugin.settings.insertTranscript)
 					.onChange(async (value) => {
 						this.plugin.settings.insertTranscript = value;
+						await this.plugin.saveSettings();
+					})
+			);
+
+		new Setting(containerEl)
+			.setName(s.settings.discardSilentRecordings.name)
+			.setDesc(s.settings.discardSilentRecordings.desc)
+			.addToggle((toggle) =>
+				toggle
+					.setValue(this.plugin.settings.discardSilentRecordings)
+					.onChange(async (value) => {
+						this.plugin.settings.discardSilentRecordings = value;
 						await this.plugin.saveSettings();
 					})
 			);

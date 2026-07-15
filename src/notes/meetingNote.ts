@@ -23,15 +23,96 @@ export function isAdhocId(id: string): boolean {
 }
 
 /**
- * Extracts the link target from a `recording` frontmatter value, stripping the
- * `[[ ]]` wrapper and any `|alias` so it can be passed to
- * `getFirstLinkpathDest`. Returns "" for a non-string / empty value.
+ * Extracts a single link target, stripping the `[[ ]]` wrapper and any `|alias`
+ * so it can be passed to `getFirstLinkpathDest`. Returns "" for a non-string /
+ * empty value.
  */
-export function recordingLinkTarget(rec: unknown): string {
+function linkTargetOf(rec: unknown): string {
 	if (typeof rec !== "string") return "";
 	return (
 		rec.replace(/^\[\[/, "").replace(/\]\]$/, "").split("|")[0] ?? ""
 	).trim();
+}
+
+/** The last path segment of a link target (its file basename). */
+function linkBasename(target: string): string {
+	return target.split("/").pop() ?? target;
+}
+
+/**
+ * All recording link targets from a `recording` frontmatter value, in order.
+ * Accepts a single `[[wikilink]]` string (the legacy single-recording shape) or
+ * a YAML list of them (multiple recordings for one meeting); empties are
+ * skipped. Chronological order is preserved, newest last.
+ */
+export function recordingLinkTargets(rec: unknown): string[] {
+	const values = Array.isArray(rec) ? rec : [rec];
+	const out: string[] = [];
+	for (const v of values) {
+		const target = linkTargetOf(v);
+		if (target) out.push(target);
+	}
+	return out;
+}
+
+/**
+ * The link target for a `recording` frontmatter value, accepting either a single
+ * `[[wikilink]]` string or a YAML list of them. With multiple recordings this
+ * returns the LATEST (last) one, so single-value consumers — "open recording",
+ * agenda state — act on the most recent take. Returns "" when there are no
+ * (valid) recording links.
+ */
+export function recordingLinkTarget(rec: unknown): string {
+	const targets = recordingLinkTargets(rec);
+	return targets[targets.length - 1] ?? "";
+}
+
+/** The raw frontmatter link strings, minus empties, as a normalized array. */
+function recordingLinkValues(rec: unknown): string[] {
+	return (Array.isArray(rec) ? rec : [rec]).filter(
+		(v): v is string => typeof v === "string" && linkTargetOf(v) !== ""
+	);
+}
+
+/**
+ * Adds `link` (a `[[wikilink]]`) to a `recording` frontmatter value and returns
+ * the new value: a bare string when it's the only recording (legacy shape), a
+ * list once there are several. De-dupes by link target so re-linking the same
+ * file is a no-op, and appends (newest last) so {@link recordingLinkTarget}
+ * yields the latest take. Pure/testable.
+ */
+export function appendRecordingLink(
+	existing: unknown,
+	link: string
+): string | string[] {
+	const newTarget = linkTargetOf(link);
+	const values = recordingLinkValues(existing);
+	if (!values.some((v) => linkTargetOf(v) === newTarget)) values.push(link);
+	return values.length === 1 ? (values[0] as string) : values;
+}
+
+/**
+ * Removes the entry matching `target` (a vault-relative path, or a bare
+ * basename) from a `recording` frontmatter value. Prefers an exact link-target
+ * match — so two takes that happen to share a basename in different folders
+ * don't both get dropped — and only falls back to basename matching when no
+ * link matches exactly (so a bare `[[file]]` link is still found from a full
+ * path). Returns the reduced value — a bare string when one remains, a list
+ * when several do, or `undefined` when none remain (so the caller can delete
+ * the key). Pure/testable.
+ */
+export function dropRecordingLink(
+	existing: unknown,
+	target: string
+): string | string[] | undefined {
+	const values = recordingLinkValues(existing);
+	const hasExact = values.some((v) => linkTargetOf(v) === target);
+	const targetBase = linkBasename(target);
+	const kept = hasExact
+		? values.filter((v) => linkTargetOf(v) !== target)
+		: values.filter((v) => linkBasename(linkTargetOf(v)) !== targetBase);
+	if (kept.length === 0) return undefined;
+	return kept.length === 1 ? (kept[0] as string) : kept;
 }
 
 /** Everything the note builder needs, decoupled from the calendar/scheduler types. */
@@ -598,7 +679,13 @@ export async function createMeetingNote(
 	return reuse(file);
 }
 
-/** Links the saved recording into the note's frontmatter and marks it recorded. */
+/**
+ * Links the saved recording into the note's frontmatter and marks it recorded.
+ * Appends to any existing recording(s) rather than replacing, so a meeting can
+ * carry more than one take (all stay owned by the note for retention); the
+ * frontmatter stays a bare string until a second recording promotes it to a
+ * list.
+ */
 export async function linkRecording(
 	app: App,
 	file: TFile,
@@ -606,7 +693,7 @@ export async function linkRecording(
 ): Promise<void> {
 	await app.fileManager.processFrontMatter(file, (fm) => {
 		const f = fm as Record<string, unknown>;
-		f.recording = `[[${recordingFileName}]]`;
+		f.recording = appendRecordingLink(f.recording, `[[${recordingFileName}]]`);
 		f.status = "recorded";
 	});
 }
@@ -666,10 +753,12 @@ export function findMeetingNoteForAudio(app: App, audio: TFile): TFile | null {
 		const fm = app.metadataCache.getFileCache(file)?.frontmatter as
 			| Record<string, unknown>
 			| undefined;
-		const link = recordingLinkTarget(fm?.["recording"]);
-		if (!link) continue;
-		const dest = app.metadataCache.getFirstLinkpathDest(link, file.path);
-		if (dest instanceof TFile && dest.path === audio.path) return file;
+		// Check every linked recording, not just the latest, so an earlier take
+		// still resolves to its owning note (retention must find all of them).
+		for (const link of recordingLinkTargets(fm?.["recording"])) {
+			const dest = app.metadataCache.getFirstLinkpathDest(link, file.path);
+			if (dest instanceof TFile && dest.path === audio.path) return file;
+		}
 	}
 	return null;
 }
@@ -716,21 +805,80 @@ export function stripTranscript(content: string): string {
 	return out.join("\n");
 }
 
-/** Places the transcript as a collapsed callout at the very bottom of the note body. Pure/testable. */
-export function transcriptAtBottom(content: string, transcript: string): string {
+/** Divider between chronological transcript segments inside the one callout. */
+export const TRANSCRIPT_SEGMENT_SEPARATOR = "\n\n---\n\n";
+
+/**
+ * The plain text of a previously-inserted transcript (collapsed callout or
+ * legacy `## Transcript` heading), or "" when there's none. Inverse of
+ * {@link formatTranscriptCallout}: unquotes the `> ` callout lines so the text
+ * can be re-emitted. Pure/testable.
+ */
+export function extractTranscriptText(content: string): string {
+	const lines = content.split("\n");
+	const calloutMarker = new RegExp(
+		`^>\\s*\\[![\\w-]+\\][+-]?\\s*${TRANSCRIPT_CALLOUT_TITLE}\\s*$`
+	);
+	for (let i = 0; i < lines.length; i++) {
+		const line = lines[i] ?? "";
+		if (calloutMarker.test(line)) {
+			const body: string[] = [];
+			for (let j = i + 1; j < lines.length && /^>/.test(lines[j] ?? ""); j++) {
+				body.push((lines[j] ?? "").replace(/^>\s?/, ""));
+			}
+			return body.join("\n").trim();
+		}
+		if (line.trim() === `## ${TRANSCRIPT_CALLOUT_TITLE}`) {
+			const body: string[] = [];
+			for (
+				let j = i + 1;
+				j < lines.length && !/^#{1,2}\s/.test(lines[j] ?? "");
+				j++
+			) {
+				body.push(lines[j] ?? "");
+			}
+			return body.join("\n").trim();
+		}
+	}
+	return "";
+}
+
+/**
+ * Places the transcript as a collapsed callout at the very bottom of the note
+ * body. With `append`, the new transcript is concatenated after any existing
+ * one (chronologically, separated by a rule) so multiple recordings of the same
+ * meeting read as one; without it the existing transcript is replaced (a
+ * re-transcribe of the same recording). Pure/testable.
+ */
+export function transcriptAtBottom(
+	content: string,
+	transcript: string,
+	append = false
+): string {
+	const existing = append ? extractTranscriptText(content) : "";
+	const combined = existing
+		? `${existing}${TRANSCRIPT_SEGMENT_SEPARATOR}${transcript.trim()}`
+		: transcript;
 	const stripped = stripTranscript(content).replace(/\s+$/, "");
-	const block = formatTranscriptCallout(transcript);
+	const block = formatTranscriptCallout(combined);
 	return `${stripped.length ? `${stripped}\n\n` : ""}${block}\n`;
 }
 
-/** Writes the transcript into a collapsed callout at the note's bottom and marks it transcribed. */
+/**
+ * Writes the transcript into a collapsed callout at the note's bottom and marks
+ * it transcribed. `append` concatenates after any existing transcript (used by
+ * the auto-transcribe that runs after a fresh recording, so a second take
+ * extends the meeting rather than clobbering the first); the default replaces
+ * (a manual re-transcribe of one recording).
+ */
 export async function insertTranscript(
 	app: App,
 	file: TFile,
-	transcript: string
+	transcript: string,
+	opts?: { append?: boolean }
 ): Promise<void> {
 	const content = await app.vault.read(file);
-	const next = transcriptAtBottom(content, transcript);
+	const next = transcriptAtBottom(content, transcript, opts?.append ?? false);
 	if (next !== content) await app.vault.modify(file, next);
 	await app.fileManager.processFrontMatter(file, (fm) => {
 		const f = fm as Record<string, unknown>;

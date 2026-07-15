@@ -27,6 +27,7 @@ import { actionNotice, multiActionNotice, NoticeAction } from "./ui/actionNotice
 import {
     ADHOC_ID_PREFIX,
     createMeetingNote,
+    dropRecordingLink,
     findMeetingNoteForAudio,
     folderOf,
     insertTranscript,
@@ -37,10 +38,12 @@ import {
     normalizeFolderPathOrEmpty,
     parseStampDate,
     recordingLinkTarget,
+    recordingLinkTargets,
     sanitizeName,
     scanMeetingNotes,
     stripTranscript,
     templateStaticRoot,
+    TRANSCRIPT_SEGMENT_SEPARATOR,
     transcriptAtBottom,
     upsertSection,
 } from "./notes/meetingNote";
@@ -132,6 +135,19 @@ import { execFile } from "child_process";
  *   - "mixed":    always transcribe the single joint track
  */
 type TranscribeMode = "auto" | "diarized" | "mixed";
+
+/**
+ * The outcome of transcribing one recording (take) to text, before any note
+ * write. "text" carries the ready-to-insert transcript; the rest are the
+ * no-transcript outcomes each caller handles differently (a fresh single take
+ * may discard an "empty" as silence; a multi-take rebuild just skips it). User
+ * cancellation is not modelled here — it throws so the queue rejects.
+ */
+type TranscribeTakeResult =
+    | { kind: "text"; text: string }
+    | { kind: "empty" }
+    | { kind: "partial" }
+    | { kind: "error"; message: string };
 
 export default class SystemRecordingPlugin extends Plugin {
     settings: SystemRecordingSettings;
@@ -241,7 +257,7 @@ export default class SystemRecordingPlugin extends Plugin {
         this.ribbonIconEl = this.addRibbonIcon(
             RECORD_ICON,
             t().ribbon.toggleRecording,
-            () => this.toggleRecording()
+            (evt) => this.onRibbonClick(evt)
         );
 
         // Meeting agenda sidebar view
@@ -591,12 +607,44 @@ export default class SystemRecordingPlugin extends Plugin {
 
     // MARK: - Recording control
 
-    private toggleRecording() {
+    /**
+     * Ribbon mic behavior. While recording it stops. Otherwise, if a meeting
+     * note is the active file, it offers a choice — record another take for that
+     * meeting, or start a fresh ad-hoc one — so the ribbon is useful when you're
+     * looking at a meeting (e.g. the person finally joined and you want to
+     * record again). With no meeting note in focus it just starts an ad-hoc
+     * meeting, exactly as before.
+     */
+    private onRibbonClick(evt: MouseEvent): void {
         if (this.recorder.isRecording) {
             this.stopRecording();
-        } else {
-            void this.startAdHocMeeting();
+            return;
         }
+        const active = this.app.workspace.getActiveFile();
+        if (active && this.isMeetingNote(active)) {
+            const meeting = this.agendaMeetingFromNote(active);
+            const menu = new Menu();
+            menu.addItem((item) =>
+                item
+                    // Mirror the agenda row: "Record again" once a take exists.
+                    .setTitle(
+                        meeting.recording
+                            ? t().event.recordAgain
+                            : t().ribbon.recordForMeeting(meeting.title)
+                    )
+                    .setIcon("mic")
+                    .onClick(() => this.startRecordingForMeeting(meeting))
+            );
+            menu.addItem((item) =>
+                item
+                    .setTitle(t().ribbon.newAdhoc)
+                    .setIcon("plus")
+                    .onClick(() => void this.startAdHocMeeting())
+            );
+            menu.showAtMouseEvent(evt);
+            return;
+        }
+        void this.startAdHocMeeting();
     }
 
     /**
@@ -1371,6 +1419,80 @@ export default class SystemRecordingPlugin extends Plugin {
 		}
 	}
 
+	/**
+	 * Starts a recording for a meeting. When the note already exists (agenda row,
+	 * note context menu, or the ribbon on an open meeting note) it records
+	 * straight into that file, bypassing the identity lookup — otherwise a note
+	 * without an `event_id` (e.g. a hand-made `meeting_url`-only note) would be
+	 * duplicated at the template-resolved path. Only when there is no note yet
+	 * (a calendar meeting never opened) does it create one.
+	 */
+	private startRecordingForMeeting(m: AgendaMeeting): void {
+		if (m.note) {
+			void this.recordIntoNote(
+				m.note,
+				m.id || undefined,
+				m.end instanceof Date ? m.end.getTime() : undefined
+			);
+		} else {
+			void this.startMeetingRecording(agendaToMeetingInfo(m));
+		}
+	}
+
+	/**
+	 * True when meeting `m` is the one currently recording. Matches on the
+	 * calendar event id, and falls back to the note path so record-again into a
+	 * note without an `event_id` (e.g. a hand-made `meeting_url`-only note, whose
+	 * `m.id` is "") still shows "Stop" on its row instead of "Record again".
+	 */
+	private isRecordingMeeting(m: AgendaMeeting): boolean {
+		if (!this.recorder.isRecording) return false;
+		if (this.currentRecordingEventId && this.currentRecordingEventId === m.id) {
+			return true;
+		}
+		// Prefer the live note TFile's path over the string captured at record
+		// start, so a rename mid-recording (which updates the TFile in place)
+		// still matches the row.
+		const recordingNotePath =
+			this.currentMeetingNote?.path ?? this.currentMeetingNotePath;
+		return m.note != null && recordingNotePath === m.note.path;
+	}
+
+	/** Records a new take directly into an existing note (no createMeetingNote). */
+	private async recordIntoNote(
+		file: TFile,
+		eventId?: string,
+		endMs?: number
+	): Promise<void> {
+		if (!Platform.isMacOS) {
+			new Notice(t().notices.macOnly);
+			return;
+		}
+		try {
+			await this.app.workspace.getLeaf(false).openFile(file);
+			await this.startRecording(
+				{
+					folder: folderOf(file),
+					basename: file.basename,
+					notePath: file.path,
+					eventId,
+					eventEnd:
+						typeof endMs === "number" && Number.isFinite(endMs)
+							? endMs
+							: null,
+					note: file,
+				},
+				{ replaceCurrent: true }
+			);
+		} catch (e) {
+			new Notice(
+				t().notices.recordingError(
+					e instanceof Error ? e.message : String(e)
+				)
+			);
+		}
+	}
+
 	private noteConfig(): MeetingNoteConfig {
 		return {
 			oneOffFolderTemplate: this.settings.oneOffFolderTemplate,
@@ -1473,12 +1595,9 @@ export default class SystemRecordingPlugin extends Plugin {
             isAuthenticated: () => this.isCalendarAuthenticated(),
             authenticate: () => this.authenticateCalendar(),
             fetchMeetings: (fromMs, toMs) => this.fetchAgendaMeetings(fromMs, toMs),
-            isRecordingThis: (m) =>
-                this.recorder.isRecording &&
-                this.currentRecordingEventId === m.id,
+            isRecordingThis: (m) => this.isRecordingMeeting(m),
             onOpenOrCreate: (m) => void this.openOrCreateNote(m),
-            onCreateAndRecord: (m) =>
-                void this.startMeetingRecording(agendaToMeetingInfo(m)),
+            onCreateAndRecord: (m) => this.startRecordingForMeeting(m),
             onCreateNote: (m) => void this.createNoteOnly(m),
             onStop: () => this.stopRecording(),
             onOpenRecording: (m) => void this.openRecording(m),
@@ -1504,8 +1623,12 @@ export default class SystemRecordingPlugin extends Plugin {
             const v = fm[k];
             return typeof v === "string" && v.trim().length > 0;
         };
+        // `recording` may be a single link (legacy) or a YAML list (multiple
+        // takes), so resolve through the list-aware helper rather than a bare
+        // string check — otherwise a multi-take note wouldn't be recognized.
+        const hasRecording = recordingLinkTarget(fm["recording"]) !== "";
         return (
-            nonEmpty("event_id") || nonEmpty("recording") || nonEmpty("meeting_url")
+            nonEmpty("event_id") || hasRecording || nonEmpty("meeting_url")
         );
     }
 
@@ -1701,8 +1824,7 @@ export default class SystemRecordingPlugin extends Plugin {
     private noteRowHandlers(): RowHandlers {
         return {
             onOpenOrCreate: (m) => void this.openOrCreateNote(m),
-            onCreateAndRecord: (m) =>
-                void this.startMeetingRecording(agendaToMeetingInfo(m)),
+            onCreateAndRecord: (m) => this.startRecordingForMeeting(m),
             onCreateNote: (m) => void this.createNoteOnly(m),
             onStop: () => this.stopRecording(),
             onOpenRecording: (m) => void this.openRecording(m),
@@ -1717,9 +1839,7 @@ export default class SystemRecordingPlugin extends Plugin {
                 if (m.meetingUrl) void this.copyMeetingLink(m.meetingUrl);
             },
             onSkip: () => {},
-            isRecordingThis: (m) =>
-                this.recorder.isRecording &&
-                this.currentRecordingEventId === m.id,
+            isRecordingThis: (m) => this.isRecordingMeeting(m),
         };
     }
 
@@ -1790,7 +1910,44 @@ export default class SystemRecordingPlugin extends Plugin {
             new Notice(t().agenda.notices.noRecording);
             return;
         }
+        // A manual re-transcribe REPLACES the transcript. With several takes,
+        // transcribing only the latest and replacing would drop the earlier
+        // ones' text, so rebuild the whole transcript from every take in one
+        // atomic write (see rebuildTranscriptFromTakes). A single take falls
+        // through to the plain replace path. Route on the number of linked takes
+        // (not resolved files) so a missing audio file can't silently downgrade
+        // a multi-take note to a single-take replace that wipes earlier text —
+        // the rebuild detects the missing file and aborts instead.
+        const linkCount = m.note ? this.recordingLinkCount(m.note) : 0;
+        if (m.note && linkCount > 1) {
+            await this.rebuildTranscriptFromTakes(m.note, linkCount, mode);
+            return;
+        }
         await this.launchTranscriber(m.recording, mode);
+    }
+
+    /** How many recordings a note's `recording` frontmatter links (array-aware). */
+    private recordingLinkCount(note: TFile): number {
+        const fm = this.app.metadataCache.getFileCache(note)?.frontmatter as
+            | Record<string, unknown>
+            | undefined;
+        return recordingLinkTargets(fm?.["recording"]).length;
+    }
+
+    /** Resolves a note's linked recording(s) to TFiles, in chronological order. */
+    private resolveRecordingTakes(note: TFile): TFile[] {
+        const fm = this.app.metadataCache.getFileCache(note)?.frontmatter as
+            | Record<string, unknown>
+            | undefined;
+        const out: TFile[] = [];
+        for (const link of recordingLinkTargets(fm?.["recording"])) {
+            const dest = this.app.metadataCache.getFirstLinkpathDest(
+                link,
+                note.path
+            );
+            if (dest instanceof TFile) out.push(dest);
+        }
+        return out;
     }
 
     /**
@@ -1957,8 +2114,15 @@ export default class SystemRecordingPlugin extends Plugin {
      */
     private async launchTranscriber(
         recording: TFile,
-        mode: TranscribeMode = "auto"
+        mode: TranscribeMode = "auto",
+        opts?: { fresh?: boolean }
     ): Promise<void> {
+        // "fresh" = the auto-transcribe fired right after a stop (vs. a manual
+        // re-transcribe). The fresh path appends its transcript to any existing
+        // one (so a new take extends the meeting) and may auto-discard an empty
+        // result as silence; a manual re-transcribe replaces. A multi-take
+        // manual rebuild has its own path (rebuildTranscriptFromTakes).
+        const fresh = opts?.fresh ?? false;
         if (!this.settings.apiBaseUrl || !this.settings.apiKey) {
             new Notice(t().notices.transcribeNoEndpoint);
             return;
@@ -1989,7 +2153,8 @@ export default class SystemRecordingPlugin extends Plugin {
                         recording,
                         label,
                         mode,
-                        signal
+                        signal,
+                        fresh
                     );
                 },
             });
@@ -2015,17 +2180,20 @@ export default class SystemRecordingPlugin extends Plugin {
     }
 
     /**
-     * The single transcription pass run by the queue. Returns the note + fresh
-     * transcript to enrich afterward, or null when there's nothing to enrich
-     * (empty/partial result, or no owning note). Throws only on cancellation, so
-     * the queue rejects and the caller skips enrichment.
+     * Transcribes one recording (take) to ready-to-insert text, without writing
+     * to any note — the shared core of the single-take writer
+     * ({@link transcribeToNote}) and the multi-take rebuild
+     * ({@link rebuildTranscriptFromTakes}). Drives the shared progress bar and
+     * classifies the outcome (see {@link TranscribeTakeResult}). User
+     * cancellation throws {@link TranscriptionCancelledError} so the queue
+     * rejects; every other failure returns an "error"/"partial" result.
      */
-    private async transcribeToNote(
+    private async transcribeTakeToText(
         recording: TFile,
         label: string,
         mode: TranscribeMode,
         signal: AbortSignal
-    ): Promise<{ note: TFile; transcript: string } | null> {
+    ): Promise<TranscribeTakeResult> {
         // Single-owner progress: only the running job writes to the shared bar,
         // labelled with the meeting name (and any queued-behind count).
         const onProgress = (pct: number): void => {
@@ -2102,42 +2270,19 @@ export default class SystemRecordingPlugin extends Plugin {
                 console.warn(
                     `[Meeting Copilot][transcribe] "${recording.name}" produced an empty transcript after filtering; note left unchanged`
                 );
-                new Notice(t().notices.transcribeEmpty);
-                if (!this.recorder.isRecording) this.clearActionStatus();
-                return null;
+                return { kind: "empty" };
             }
             // A partial/failed run comes back as a marker-prefixed string
             // (not clean transcript text), so don't insert it as the transcript.
             if (isPartialTranscript(trimmed)) {
-                new Notice(t().notices.transcribePartial);
-                this.setActionStatus(t().statusBar.transcribeFailed, "error");
-                return null;
+                return { kind: "partial" };
             }
             // Tell the reader (and the enrichment model) who "Me"/"Them" are,
             // so owner attribution of action items has something to go on.
             const finalText = diarized
                 ? `${t().transcript.speakerBanner}\n\n${text}`
                 : text;
-            const result = await this.handleTranscriptionCompleted({
-                audioFile: recording,
-                transcription: finalText,
-                file: null,
-            });
-            console.warn(
-                `[Meeting Copilot][transcribe] "${recording.name}" completed: note ${
-                    result.note
-                        ? "found and updated"
-                        : "NOT found (no note matched this recording)"
-                }`
-            );
-            if (!result.note) {
-                new Notice(t().notices.transcribeNoNote(recording.basename));
-                return null;
-            }
-            // The .me/.them/.speech sidecars are left in place: a later manual
-            // re-transcribe reuses them, and the retention sweep ages them out
-            // on the same rule as the audio.
-            return { note: result.note, transcript: result.transcript ?? finalText };
+            return { kind: "text", text: finalText };
         } catch (e) {
             // A user cancellation must propagate so the queue rejects (and the
             // caller skips enrichment); everything else is a recoverable failure
@@ -2154,27 +2299,208 @@ export default class SystemRecordingPlugin extends Plugin {
             // The engine throws the partial text (marker-prefixed) for a
             // partial/failed run rather than returning it, so classify it.
             if (isPartialTranscript(msg)) {
-                new Notice(t().notices.transcribePartial);
-            } else {
-                new Notice(t().notices.transcribeError(msg));
+                return { kind: "partial" };
             }
+            return { kind: "error", message: msg };
+        }
+    }
+
+    /**
+     * The single-take transcription pass run by the queue: transcribes one
+     * recording and writes the result into its meeting note. Returns the note +
+     * fresh transcript to enrich afterward, or null when there's nothing to
+     * enrich (empty/partial/error result, or no owning note). A `fresh` take
+     * (auto-transcribe right after a stop) APPENDS to any existing transcript so
+     * a new take extends the meeting, and may auto-discard an empty result as
+     * silence; a manual re-transcribe REPLACES. Throws only on cancellation, so
+     * the queue rejects and the caller skips enrichment.
+     */
+    private async transcribeToNote(
+        recording: TFile,
+        label: string,
+        mode: TranscribeMode,
+        signal: AbortSignal,
+        fresh = false
+    ): Promise<{ note: TFile; transcript: string } | null> {
+        const res = await this.transcribeTakeToText(recording, label, mode, signal);
+        if (res.kind === "empty") {
+            // A fresh recording with no speech is the "started before anyone
+            // joined" throwaway — discard it (audio + link) so the meeting
+            // re-offers record. Only on the fresh post-stop path: a manual
+            // re-transcribe that comes back empty must never delete audio.
+            // Safety net: if the recorder's own speech detection (split-mode
+            // speech.json) found speech, an empty transcript is a transcription
+            // miss, not silence — keep the audio rather than discard it.
+            if (
+                fresh &&
+                this.settings.discardSilentRecordings &&
+                !(await this.recordingHasSpeech(recording))
+            ) {
+                await this.discardSilentRecording(recording);
+            } else {
+                new Notice(t().notices.transcribeEmpty);
+            }
+            if (!this.recorder.isRecording) this.clearActionStatus();
+            return null;
+        }
+        if (res.kind === "partial") {
+            new Notice(t().notices.transcribePartial);
             this.setActionStatus(t().statusBar.transcribeFailed, "error");
             return null;
+        }
+        if (res.kind === "error") {
+            new Notice(t().notices.transcribeError(res.message));
+            this.setActionStatus(t().statusBar.transcribeFailed, "error");
+            return null;
+        }
+        const finalText = res.text;
+        const result = await this.handleTranscriptionCompleted(
+            {
+                audioFile: recording,
+                transcription: finalText,
+                file: null,
+            },
+            fresh
+        );
+        console.warn(
+            `[Meeting Copilot][transcribe] "${recording.name}" completed: note ${
+                result.note
+                    ? "found and updated"
+                    : "NOT found (no note matched this recording)"
+            }`
+        );
+        if (!result.note) {
+            new Notice(t().notices.transcribeNoNote(recording.basename));
+            return null;
+        }
+        // The .me/.them/.speech sidecars are left in place: a later manual
+        // re-transcribe reuses them, and the retention sweep ages them out
+        // on the same rule as the audio.
+        return { note: result.note, transcript: result.transcript ?? finalText };
+    }
+
+    /**
+     * Manual re-transcribe for a note that owns several takes: transcribes every
+     * take to text (through the queue, one at a time), then does a SINGLE atomic
+     * replace of the note's transcript with all takes joined chronologically and
+     * enriches once. All-or-nothing: the note is written only when EVERY take
+     * produced text, so a missing audio file, an empty/partial/failed take, or a
+     * cancellation mid-run leaves the existing (complete) transcript intact
+     * rather than replacing it with a shorter rebuild. `expectedTakes` is the
+     * number of linked takes, so an unresolvable link is caught as a missing
+     * file instead of silently dropped.
+     */
+    private async rebuildTranscriptFromTakes(
+        note: TFile,
+        expectedTakes: number,
+        mode: TranscribeMode
+    ): Promise<void> {
+        if (!this.settings.apiBaseUrl || !this.settings.apiKey) {
+            new Notice(t().notices.transcribeNoEndpoint);
+            return;
+        }
+        const takes = this.resolveRecordingTakes(note);
+        // A linked take whose audio can't be resolved means we can't reproduce
+        // the full transcript — abort rather than replace it with a rebuild that
+        // silently omits the missing take.
+        if (takes.length !== expectedTakes) {
+            new Notice(t().notices.retranscribeIncomplete);
+            if (!this.recorder.isRecording) this.clearActionStatus();
+            return;
+        }
+        // Bail if any take is already queued/running (a fresh auto-transcribe,
+        // or a double trigger) — rebuilding while one is in flight would
+        // interleave writes.
+        if (takes.some((take) => this.transcriptionQueue.has(take.path))) {
+            new Notice(t().notices.transcribeInProgress);
+            return;
+        }
+        const label = this.meetingNoteLabel(note);
+        const segments: string[] = [];
+        let allText = true;
+        try {
+            for (const take of takes) {
+                if (this.transcriptionQueue.snapshot().running) {
+                    new Notice(t().notices.transcribeQueued(label));
+                }
+                const outcome: { value: TranscribeTakeResult | null } = {
+                    value: null,
+                };
+                await this.transcriptionQueue.enqueue({
+                    id: take.path,
+                    label,
+                    run: async (signal) => {
+                        outcome.value = await this.transcribeTakeToText(
+                            take,
+                            label,
+                            mode,
+                            signal
+                        );
+                    },
+                });
+                const res = outcome.value;
+                if (res?.kind === "text") {
+                    segments.push(res.text);
+                    continue;
+                }
+                // Any non-text outcome (empty/partial/error) means we can't
+                // produce the complete transcript this run — remember that and
+                // surface why, but keep going so the user sees every take's
+                // outcome before we decide not to overwrite.
+                allText = false;
+                if (res?.kind === "partial")
+                    new Notice(t().notices.transcribePartial);
+                else if (res?.kind === "error")
+                    new Notice(t().notices.transcribeError(res.message));
+                else new Notice(t().notices.transcribeEmpty);
+            }
+        } catch (e) {
+            // Cancellation (or an unexpected queue failure) mid-rebuild: leave
+            // the existing transcript untouched rather than write a partial one.
+            if (!(e instanceof TranscriptionCancelledError)) {
+                console.warn("[Meeting Copilot] transcript rebuild failed", e);
+            }
+            return;
+        }
+        if (!allText || segments.length === 0) {
+            // Some take didn't come back as clean text: don't overwrite the
+            // existing (complete) transcript with a shorter rebuild.
+            console.warn(
+                "[Meeting Copilot][transcribe] rebuild incomplete; note left unchanged"
+            );
+            new Notice(t().notices.retranscribeIncomplete);
+            if (!this.recorder.isRecording) this.clearActionStatus();
+            return;
+        }
+        const combined = segments.join(TRANSCRIPT_SEGMENT_SEPARATOR);
+        if (this.settings.insertTranscript) {
+            await insertTranscript(this.app, note, combined, { append: false });
+            new Notice(t().notices.transcriptAdded(note.basename));
+            this.setActionStatus(t().statusBar.transcriptAdded, "success");
+        } else if (!this.recorder.isRecording) {
+            this.hideStatusBar();
+        }
+        this.agendaEvents.emit("changed", undefined);
+        if (this.settings.enableEnrichment && this.settings.enrichOnTranscribe) {
+            await this.enrichMeetingNote(note, combined);
         }
     }
 
     /** A friendly name for a recording in the queue UI: its meeting note's title, else the file basename. */
     private transcribeLabelFor(recording: TFile): string {
         const note = findMeetingNoteForAudio(this.app, recording);
-        if (note) {
-            const fm = this.app.metadataCache.getFileCache(note)?.frontmatter as
-                | Record<string, unknown>
-                | undefined;
-            const title = fm?.["title"];
-            if (typeof title === "string" && title.trim()) return title.trim();
-            return note.basename;
-        }
+        if (note) return this.meetingNoteLabel(note);
         return recording.basename;
+    }
+
+    /** A meeting note's display label for the queue UI: its `title` frontmatter, else its basename. */
+    private meetingNoteLabel(note: TFile): string {
+        const fm = this.app.metadataCache.getFileCache(note)?.frontmatter as
+            | Record<string, unknown>
+            | undefined;
+        const title = fm?.["title"];
+        if (typeof title === "string" && title.trim()) return title.trim();
+        return note.basename;
     }
 
     /** Reflects the queue's running/waiting state in the status bar (single-owner). */
@@ -2711,13 +3037,124 @@ export default class SystemRecordingPlugin extends Plugin {
     }
 
     /**
+     * True when the recorder's speech-window sidecar (split mode's
+     * `<base>.speech.json`) reports any speech. Absent sidecar (mixed mode) →
+     * false: there's no independent evidence, so the empty transcript is taken at
+     * face value. Guards silent-discard against transcription misses, so it errs
+     * toward KEEPING the audio whenever the evidence is uncertain: a sidecar that
+     * exists but is unreadable/unparsable returns true (don't discard). Reads the
+     * sidecar straight off disk via the adapter (not the vault index) so a
+     * just-written speech.json isn't missed to index lag — which would strip the
+     * very safety net right when it matters most (immediately after a stop).
+     */
+    private async recordingHasSpeech(recording: TFile): Promise<boolean> {
+        const speechPath = sidecarPathsFor(recording.path).speech;
+        let raw: string;
+        try {
+            if (!(await this.app.vault.adapter.exists(speechPath))) return false;
+            raw = await this.app.vault.adapter.read(speechPath);
+        } catch {
+            // Present but unreadable → don't treat as silence.
+            return true;
+        }
+        const windows = parseSpeechWindows(raw);
+        // Present but unparsable → err toward keeping the audio.
+        if (!windows) return true;
+        return windows.me.length > 0 || windows.them.length > 0;
+    }
+
+    /**
+     * Moves a vault file to the trash if it exists; never throws. Resolves via
+     * the adapter (+ retry) rather than the vault index so a just-written file
+     * the index hasn't caught up to (the .me/.them/.speech sidecars right after a
+     * stop) is still found and removed instead of orphaned. Returns true when the
+     * path is gone afterward (absent to begin with, or trashed), false only when
+     * the file exists but trashing failed — so callers can avoid unlinking a
+     * recording whose audio is still on disk.
+     */
+    private async trashIfExists(vaultPath: string): Promise<boolean> {
+        // Check the disk directly (bypassing the vault index) so a genuinely
+        // absent path returns fast and a just-written file is still found.
+        if (!(await this.app.vault.adapter.exists(vaultPath))) return true;
+        const f = await this.resolveFileWithRetry(vaultPath);
+        if (!f) {
+            // On disk but never resolved to a TFile (index lag exhausted): we
+            // can't trash it via the file manager, and claiming success would
+            // orphan it — report failure so the caller keeps the link.
+            console.warn(
+                `[Meeting Copilot] could not resolve ${vaultPath} to trash it`
+            );
+            return false;
+        }
+        try {
+            await this.app.fileManager.trashFile(f);
+            return true;
+        } catch (e) {
+            console.warn(`[Meeting Copilot] failed to trash ${vaultPath}`, e);
+            return false;
+        }
+    }
+
+    /**
+     * Discards a just-stopped recording that came back silent (no speech in its
+     * transcript): trashes the audio + its split sidecars and removes the
+     * recording's link from its owning meeting note, so the meeting immediately
+     * re-offers "record". When that was the note's only recording and no
+     * transcript was ever saved, the note falls back to "scheduled" so it
+     * doesn't read as recorded. The owning note is resolved *before* trashing
+     * (the link resolves only while the file still exists). Best-effort.
+     */
+    private async discardSilentRecording(recording: TFile): Promise<void> {
+        const note = findMeetingNoteForAudio(this.app, recording);
+        const prunedPath = recording.path;
+        const sc = sidecarPathsFor(recording.path);
+        // Trash the audio first; only unlink it from the note once it's actually
+        // gone. Unlinking a still-present recording would orphan it — on disk but
+        // owned by no note, so the retention sweep would never reclaim it.
+        if (!(await this.trashIfExists(recording.path))) {
+            console.warn(
+                `[Meeting Copilot][recorder] could not discard silent recording "${recording.name}" (trash failed); left linked`
+            );
+            return;
+        }
+        await this.trashIfExists(sc.me);
+        await this.trashIfExists(sc.them);
+        await this.trashIfExists(sc.speech);
+        if (note) {
+            await this.app.fileManager.processFrontMatter(note, (fm) => {
+                const f = fm as Record<string, unknown>;
+                const next = dropRecordingLink(f.recording, prunedPath);
+                const hasTranscript = f.transcript_saved === true;
+                if (next === undefined) {
+                    // No recordings left: back to "scheduled" unless an earlier
+                    // transcript is still in the note (then it's "transcribed").
+                    delete f.recording;
+                    f.status = hasTranscript ? "transcribed" : "scheduled";
+                } else {
+                    // Other take(s) remain — `linkRecording` had regressed status
+                    // to "recorded" for this now-discarded take; reflect whether
+                    // the survivors are already transcribed.
+                    f.recording = next;
+                    f.status = hasTranscript ? "transcribed" : "recorded";
+                }
+            });
+        }
+        console.warn(
+            `[Meeting Copilot][recorder] discarded silent recording "${recording.name}"`
+        );
+        new Notice(t().notices.silentDiscarded);
+        this.agendaEvents.emit("changed", undefined);
+    }
+
+    /**
      * Inserts a finished transcription into its meeting note and refreshes the
      * agenda. Returns the owning note (when found) and the fresh transcript, so
      * the caller can enrich *after* the transcription queue slot is released
      * (enrichment no longer runs from inside this method — see launchTranscriber).
      */
     private async handleTranscriptionCompleted(
-        payload: unknown
+        payload: unknown,
+        append = false
     ): Promise<{ note: TFile | null; transcript: string | null }> {
         let enrichTarget: TFile | null = null;
         let transcriptText: string | null = null;
@@ -2750,9 +3187,20 @@ export default class SystemRecordingPlugin extends Plugin {
                     // "note found" (not the misleading "no meeting note" notice).
                     enrichTarget = note;
                     if (this.settings.insertTranscript && !already) {
-                        await insertTranscript(this.app, note, transcript);
+                        await insertTranscript(this.app, note, transcript, {
+                            append,
+                        });
                         new Notice(t().notices.transcriptAdded(note.basename));
                         inserted = true;
+                        // Hand the caller the FULL callout (all takes) to enrich,
+                        // not just this take — otherwise a second take's summary
+                        // would ignore the first. On the replace path this equals
+                        // the take just written; on append it's the combined
+                        // chronological transcript.
+                        const combined = extractTranscript(
+                            await this.app.vault.read(note)
+                        );
+                        if (combined.trim().length > 0) transcriptText = combined;
                     }
                 }
             }
@@ -3090,13 +3538,15 @@ export default class SystemRecordingPlugin extends Plugin {
             const ownedRecordings = new Set<string>();
             for (const entry of scanMeetingNotes(this.app)) {
                 if (!entry.eventId) continue;
-                const link = recordingLinkTarget(entry.recording);
-                if (!link) continue;
-                const dest = this.app.metadataCache.getFirstLinkpathDest(
-                    link,
-                    entry.file.path
-                );
-                if (dest instanceof TFile) ownedRecordings.add(dest.path);
+                // A meeting can link more than one recording; own them all so a
+                // second take is swept on the same rule as the first.
+                for (const link of recordingLinkTargets(entry.recording)) {
+                    const dest = this.app.metadataCache.getFirstLinkpathDest(
+                        link,
+                        entry.file.path
+                    );
+                    if (dest instanceof TFile) ownedRecordings.add(dest.path);
+                }
             }
             const folders = [...new Set(this.configuredMeetingRoots())].filter(
                 (f) => f.length > 0
@@ -3141,6 +3591,12 @@ export default class SystemRecordingPlugin extends Plugin {
                 // audio) or the transcript was never captured — deleting those
                 // would destroy the only copy.
                 if (!note || !this.noteHasSavedTranscript(note)) continue;
+                // A note carrying more than one recording keeps `transcript_saved`
+                // from an earlier take even while a newer take is still pending
+                // transcription (status "recorded"). Pruning then could delete
+                // the newer, not-yet-captured audio — so hold off on the whole
+                // note until its latest take has been transcribed.
+                if (this.noteHasPendingRecording(note)) continue;
                 if (await trash(info.path)) {
                     removed++;
                     // Trash the split sidecars alongside the primary recording.
@@ -3148,13 +3604,20 @@ export default class SystemRecordingPlugin extends Plugin {
                     await trash(sc.me);
                     await trash(sc.them);
                     await trash(sc.speech);
-                    // Drop the note's now-dangling link (transcript stays in the note).
+                    // Drop just this recording's now-dangling link (a meeting
+                    // may have several); the transcript stays in the note. Only
+                    // stamp `recording_pruned` once the last one is gone.
                     await this.app.fileManager.processFrontMatter(note, (fm) => {
                         const f = fm as Record<string, unknown>;
-                        delete f.recording;
-                        f.recording_pruned = new Date()
-                            .toISOString()
-                            .slice(0, 10);
+                        const next = dropRecordingLink(f.recording, info.path);
+                        if (next === undefined) {
+                            delete f.recording;
+                            f.recording_pruned = new Date()
+                                .toISOString()
+                                .slice(0, 10);
+                        } else {
+                            f.recording = next;
+                        }
                     });
                 }
             }
@@ -3212,6 +3675,18 @@ export default class SystemRecordingPlugin extends Plugin {
     private noteHasSavedTranscript(note: TFile): boolean {
         const fm = this.app.metadataCache.getFileCache(note)?.frontmatter;
         return fm?.transcript_saved === true;
+    }
+
+    /**
+     * True when the note has a recording awaiting transcription — its `status`
+     * is "recorded" (the state `linkRecording` stamps on every stop, cleared to
+     * "transcribed" by `insertTranscript`). Used to hold retention off a
+     * multi-take note whose newest take isn't captured yet, even though an
+     * earlier take already set `transcript_saved`.
+     */
+    private noteHasPendingRecording(note: TFile): boolean {
+        const fm = this.app.metadataCache.getFileCache(note)?.frontmatter;
+        return fm?.status === "recorded";
     }
 
     /**
@@ -3322,7 +3797,9 @@ export default class SystemRecordingPlugin extends Plugin {
                                 );
                                 return;
                             }
-                            return this.launchTranscriber(audio);
+                            return this.launchTranscriber(audio, "auto", {
+                                fresh: true,
+                            });
                         })
                         .catch((e) => {
                             console.warn(

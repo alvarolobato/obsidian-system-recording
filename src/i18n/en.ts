@@ -3,6 +3,8 @@ export const en = {
 	ribbon: {
 		toggleRecording: "Start/Stop on-demand meeting",
 		openAgenda: "Open meeting agenda",
+		recordForMeeting: (title: string) => `Record for “${title}”`,
+		newAdhoc: "New ad-hoc meeting",
 	},
 	commands: {
 		startRecording: "Start unplanned meeting",
@@ -52,6 +54,7 @@ export const en = {
 		calendarReconnect: "Google Calendar disconnected — reconnect",
 		calendarReconnectAction: "Reconnect",
 		recordingSaved: "Recording saved",
+		silentDiscarded: "No speech detected — recording discarded",
 		autoTranscribeNotIndexed:
 			"Recording saved, but auto-transcription could not start (the file never appeared in the vault index). Transcribe it from the agenda.",
 		unknownError: "Unknown error",
@@ -77,6 +80,8 @@ export const en = {
 		transcribeEmpty: "Transcription produced no text.",
 		transcribePartial:
 			"Transcription only partially succeeded — not inserted. Try again.",
+		retranscribeIncomplete:
+			"Couldn't re-transcribe every take — kept the existing transcript. Try again.",
 		transcribeInProgress: "This recording is already being transcribed…",
 		transcribeQueued: (name: string) => `Queued "${name}" for transcription`,
 		transcribeCancelled: "Transcription cancelled",
@@ -129,6 +134,7 @@ export const en = {
 		ended: (title: string) => `"${title}" has ended`,
 		startRecordingAction: "Start recording",
 		createNoteAndRecord: "Create note and start recording",
+		recordAgain: "Record again (new take)",
 		stopRecordingAction: "Stop recording",
 		// Meeting-start prompt (native notification → in-app prompt / modal).
 		startsInMin: (min: number) =>
@@ -175,6 +181,7 @@ export const en = {
 		nextMonth: "Next month",
 		actions: {
 			record: "Create note and record",
+			recordAgain: "Record again (new take)",
 			stop: "Stop recording",
 			openNote: "Open note",
 			createNote: "Create note",
@@ -263,6 +270,10 @@ export const en = {
 		autoTranscribe: {
 			name: "Auto-transcribe when recording stops",
 			desc: "When a meeting recording finishes, transcribe it automatically (no dialog) and add the transcript to the meeting note. Requires the shared AI endpoint (base URL + API key) above.",
+		},
+		discardSilentRecordings: {
+			name: "Discard silent recordings",
+			desc: "When a just-stopped recording has no speech (e.g. you started before anyone joined), move it to the trash and remove it from the note so you can record again right away. Uses the auto-transcribe result, so it needs auto-transcribe enabled.",
 		},
 		retentionDays: {
 			name: "Recording retention (days)",
