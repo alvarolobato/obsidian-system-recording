@@ -29,8 +29,10 @@ export const DASHBOARD_CSS_CLASS = "meeting-copilot-dashboard";
  * the vault's meeting notes with the calendar events the agenda already loads
  * (meetings with no note yet still appear, with a "create note" action). "Open
  * action items" lists every note's open tasks vault-wide, newest note first.
- * "Needs attention" surfaces meetings that haven't finished the pipeline. Pure
- * so it can be tested without a vault.
+ * "Needs attention" surfaces recorded meetings that still need transcription
+ * or enrichment (plus notes with a broken/missing date) — scheduled meetings
+ * with no recording, and ones already transcribing/enriching, are skipped.
+ * Pure so it can be tested without a vault.
  */
 export function buildDashboardBlock(): string {
 	return [
@@ -54,8 +56,9 @@ export function buildDashboardBlock(): string {
 		"```",
 		"",
 		"## Needs attention",
-		// Rendered by the plugin: meetings that haven't finished the
-		// scheduled → recorded → transcribed → enriched pipeline, with buttons.
+		// Rendered by the plugin: recorded meetings that still need
+		// transcription/enrichment (auto-handled ones are skipped), with
+		// buttons. Scheduled-but-unrecorded meetings aren't actionable here.
 		"```" + ATTENTION_BLOCK_LANG,
 		"```",
 		DASHBOARD_END,

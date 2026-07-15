@@ -1798,7 +1798,10 @@ export default class SystemRecordingPlugin extends Plugin {
         const notesByPath = new Map<string, TFile>();
         const meetingsByKey = new Map<string, AgendaMeeting>();
         const inputs: DashboardMeetingInput[] = [];
-        for (const entry of scanMeetingNotes(this.app)) {
+        // One vault scan feeds both the noted-meeting inputs below and the
+        // note index used to dedup calendar events (reused, not re-walked).
+        const scanned = scanMeetingNotes(this.app);
+        for (const entry of scanned) {
             if (entry.eventId === null && !entry.hasMeetingUrl) continue;
             const fm = this.app.metadataCache.getFileCache(entry.file)
                 ?.frontmatter as Record<string, unknown> | undefined;
@@ -1822,7 +1825,7 @@ export default class SystemRecordingPlugin extends Plugin {
         // whose note already exists is dropped here (the note row above
         // represents it, with fresh state). All-day entries (OOO, birthdays)
         // aren't meetings, so they're skipped.
-        const index = buildNoteIndex(this.app);
+        const index = buildNoteIndex(this.app, scanned);
         for (const ev of events) {
             if (ev.allDay) continue;
             const m = toAgendaMeeting(ev, index);
@@ -2241,9 +2244,15 @@ export default class SystemRecordingPlugin extends Plugin {
         const openTaskRe = /^\s*[-*+]\s+\[ \]/;
         const doneTaskRe = /^\s*[-*+]\s+\[[xX]\]/;
         const doneDateRe = /✅\s*(\d{4}-\d{2}-\d{2})/;
+        // Strip, in order: the list marker + checkbox, a trailing block
+        // reference (`^id`, which Obsidian pins to the very end — after the
+        // completion date), then the `✅ YYYY-MM-DD` completion date now left
+        // at the end. Doing the ref first means a task completed with a block
+        // ref shows neither the date nor the ref in the list.
         const cleanTaskText = (raw: string): string =>
             raw
                 .replace(/^\s*[-*+]\s+\[[^\]]\]\s*/, "")
+                .replace(/\s*\^[A-Za-z0-9-]+\s*$/, "")
                 .replace(/\s*✅\s*\d{4}-\d{2}-\d{2}\s*$/, "")
                 .trim();
         const today = this.todayStamp();
