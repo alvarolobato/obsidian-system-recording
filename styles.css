@@ -390,6 +390,12 @@ ul.mc-action-tasks {
     flex-shrink: 0;
 }
 
+/* Recently-completed tasks kept for their grace period: muted + struck. */
+.mc-action-task-done .mc-action-task-text {
+    color: var(--text-muted);
+    text-decoration: line-through;
+}
+
 /* Keep rendered task markdown inline and margin-free for density. */
 .mc-action-task-text > * {
     margin: 0;

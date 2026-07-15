@@ -10,7 +10,7 @@ function group(over: Partial<ActionNoteGroup>): ActionNoteGroup {
 		path: "Meetings/x.md",
 		title: "x",
 		date: new Date("2026-07-10T10:00:00"),
-		tasks: [{ text: "do it", raw: "- [ ] do it", line: 1 }],
+		tasks: [{ text: "do it", raw: "- [ ] do it", line: 1, done: false }],
 		...over,
 	};
 }
@@ -45,19 +45,34 @@ describe("sortActionNoteGroups", () => {
 		]);
 		expect(sorted.map((g) => g.path)).toEqual(["has.md"]);
 	});
+
+	it("keeps a group whose only tasks are recently-done (grace period)", () => {
+		const sorted = sortActionNoteGroups([
+			group({
+				path: "done.md",
+				tasks: [
+					{ text: "d", raw: "- [x] d ✅ 2026-07-10", line: 1, done: true },
+				],
+			}),
+		]);
+		expect(sorted.map((g) => g.path)).toEqual(["done.md"]);
+	});
 });
 
 describe("countTasks", () => {
-	it("sums tasks across groups", () => {
+	it("sums open tasks across groups, excluding done ones", () => {
 		expect(
 			countTasks([
 				group({
 					tasks: [
-						{ text: "a", raw: "- [ ] a", line: 1 },
-						{ text: "b", raw: "- [ ] b", line: 2 },
+						{ text: "a", raw: "- [ ] a", line: 1, done: false },
+						{ text: "b", raw: "- [ ] b", line: 2, done: false },
+						{ text: "c", raw: "- [x] c", line: 3, done: true },
 					],
 				}),
-				group({ tasks: [{ text: "c", raw: "- [ ] c", line: 1 }] }),
+				group({
+					tasks: [{ text: "d", raw: "- [ ] d", line: 1, done: false }],
+				}),
 			])
 		).toBe(3);
 	});

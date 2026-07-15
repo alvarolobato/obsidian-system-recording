@@ -8,12 +8,18 @@
  */
 
 export interface ActionTask {
-	/** The task text with the `- [ ]` prefix stripped (may contain markdown). */
+	/** The task text with the `- [ ]` prefix (and any `✅` date) stripped. */
 	text: string;
 	/** The full original line, used to locate the task when toggling it done. */
 	raw: string;
 	/** 0-based line index of the task in its note at scan time. */
 	line: number;
+	/**
+	 * True for a task completed within its grace period (kept in the list a
+	 * little longer so a just-ticked item doesn't vanish). Rendered checked and
+	 * struck through, and excluded from the "open action items" count.
+	 */
+	done: boolean;
 }
 
 export interface ActionNoteGroup {
@@ -42,7 +48,10 @@ export function sortActionNoteGroups(
 		});
 }
 
-/** Total open tasks across all groups (for the section's count label). */
+/** Total *open* tasks across all groups (recently-done ones don't count). */
 export function countTasks(groups: ActionNoteGroup[]): number {
-	return groups.reduce((sum, g) => sum + g.tasks.length, 0);
+	return groups.reduce(
+		(sum, g) => sum + g.tasks.filter((task) => !task.done).length,
+		0
+	);
 }

@@ -2018,13 +2018,40 @@ export default class SystemRecordingPlugin extends Plugin {
     private actionRenderers: WeakMap<HTMLElement, Component> = new WeakMap();
 
     /**
+     * Short-lived cache of the (whole-vault, disk-read) action-items scan so
+     * paging/page-size changes reuse it instead of re-reading every task note.
+     * A tick or Refresh forces a fresh scan (`force`).
+     */
+    private actionScanCache: { at: number; groups: ActionNoteGroup[] } | null =
+        null;
+
+    /** Runs (or reuses, within a short TTL) the action-items scan. */
+    private async scanActionGroups(force: boolean): Promise<ActionNoteGroup[]> {
+        const TTL_MS = 15_000;
+        if (
+            !force &&
+            this.actionScanCache &&
+            Date.now() - this.actionScanCache.at < TTL_MS
+        ) {
+            return this.actionScanCache.groups;
+        }
+        const groups = sortActionNoteGroups(await this.scanOpenTaskNotes());
+        this.actionScanCache = { at: Date.now(), groups };
+        return groups;
+    }
+
+    /**
      * Renders the dashboard's "Open action items" section: every note in the
      * vault that still has open (`- [ ]`) tasks, grouped by note and ordered
      * newest note first, kept dense and paginated (by note). Each group shows a
      * small linked title + date and its open tasks; ticking a task marks it
      * done in the source note and re-renders. `page` is 1-based (by note).
      */
-    private async renderActionItems(el: HTMLElement, page = 1): Promise<void> {
+    private async renderActionItems(
+        el: HTMLElement,
+        page = 1,
+        force = false
+    ): Promise<void> {
         const a = t().dashboard.actions;
         const restoreScroll = this.preserveScroll(el);
         el.empty();
@@ -2039,7 +2066,7 @@ export default class SystemRecordingPlugin extends Plugin {
         renderer.load();
         this.actionRenderers.set(el, renderer);
 
-        const groups = sortActionNoteGroups(await this.scanOpenTaskNotes());
+        const groups = await this.scanActionGroups(force);
         const pageSize = normalizePageSize(
             this.settings.dashboardActionsPageSize
         );
@@ -2066,7 +2093,8 @@ export default class SystemRecordingPlugin extends Plugin {
                 void this.renderActionItems(el, 1);
             },
             onGoTo: (p): void => void this.renderActionItems(el, p),
-            onRefresh: (): void => void this.renderActionItems(el, view.page),
+            onRefresh: (): void =>
+                void this.renderActionItems(el, view.page, true),
         });
 
         restoreScroll();
@@ -2104,17 +2132,28 @@ export default class SystemRecordingPlugin extends Plugin {
 
         const ul = note.createEl("ul", { cls: "mc-action-tasks" });
         for (const task of group.tasks) {
-            const li = ul.createEl("li", { cls: "mc-action-task" });
+            const li = ul.createEl("li", {
+                cls: task.done
+                    ? "mc-action-task mc-action-task-done"
+                    : "mc-action-task",
+            });
             const cb = li.createEl("input", {
                 cls: "mc-action-task-check",
                 type: "checkbox",
             });
-            cb.onclick = (): void => {
+            if (task.done) {
+                // Recently completed: shown checked/struck through its grace
+                // period, not re-tickable.
+                cb.checked = true;
                 cb.disabled = true;
-                void this.completeTask(group.path, task).then(() =>
-                    this.renderActionItems(sectionEl, page)
-                );
-            };
+            } else {
+                cb.onclick = (): void => {
+                    cb.disabled = true;
+                    void this.completeTask(group.path, task).then(() =>
+                        this.renderActionItems(sectionEl, page, true)
+                    );
+                };
+            }
             const text = li.createSpan({ cls: "mc-action-task-text" });
             // Render the task's markdown (bold owners, links) inline.
             void MarkdownRenderer.render(
@@ -2143,13 +2182,22 @@ export default class SystemRecordingPlugin extends Plugin {
      */
     private async scanOpenTaskNotes(): Promise<ActionNoteGroup[]> {
         const openTaskRe = /^\s*[-*+]\s+\[ \]/;
+        const doneTaskRe = /^\s*[-*+]\s+\[[xX]\]/;
+        const doneDateRe = /✅\s*(\d{4}-\d{2}-\d{2})/;
         const cleanTaskText = (raw: string): string =>
-            raw.replace(/^\s*[-*+]\s+\[[^\]]\]\s*/, "").trim();
+            raw
+                .replace(/^\s*[-*+]\s+\[[^\]]\]\s*/, "")
+                .replace(/\s*✅\s*\d{4}-\d{2}-\d{2}\s*$/, "")
+                .trim();
+        const today = this.todayStamp();
         const groups: ActionNoteGroup[] = [];
         for (const file of this.app.vault.getMarkdownFiles()) {
             const cache = this.app.metadataCache.getFileCache(file);
+            // Pre-filter to files that carry *any* checkbox task (open or done)
+            // — done ones matter too, so a task completed today stays in its
+            // grace period even after the cache marks it done.
             const mayHaveTasks = (cache?.listItems ?? []).some(
-                (it) => it.task === " "
+                (it) => it.task !== undefined
             );
             if (!mayHaveTasks) continue;
 
@@ -2162,7 +2210,26 @@ export default class SystemRecordingPlugin extends Plugin {
             const tasks: ActionTask[] = [];
             content.split("\n").forEach((raw, line) => {
                 if (openTaskRe.test(raw)) {
-                    tasks.push({ line, raw, text: cleanTaskText(raw) });
+                    tasks.push({
+                        line,
+                        raw,
+                        text: cleanTaskText(raw),
+                        done: false,
+                    });
+                    return;
+                }
+                // A recently-completed task is kept until midnight of the day
+                // it was completed (its `✅ YYYY-MM-DD` date equals today).
+                if (doneTaskRe.test(raw)) {
+                    const m = raw.match(doneDateRe);
+                    if (m && m[1] === today) {
+                        tasks.push({
+                            line,
+                            raw,
+                            text: cleanTaskText(raw),
+                            done: true,
+                        });
+                    }
                 }
             });
             if (tasks.length === 0) continue;
@@ -2183,6 +2250,15 @@ export default class SystemRecordingPlugin extends Plugin {
             });
         }
         return groups;
+    }
+
+    /** Local `YYYY-MM-DD` for today (the `✅` completion date we write/match). */
+    private todayStamp(): string {
+        const now = new Date();
+        const pad = (n: number): string => String(n).padStart(2, "0");
+        return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(
+            now.getDate()
+        )}`;
     }
 
     /**
@@ -2215,7 +2291,9 @@ export default class SystemRecordingPlugin extends Plugin {
      * Marks a scanned task done in its source note. The captured line index is
      * used when it still holds the task; otherwise the original line text is
      * located afresh (the note may have changed since the scan). The first
-     * `[ ]` checkbox on that line becomes `[x]`.
+     * `[ ]` checkbox on that line becomes `[x]` and a `✅ YYYY-MM-DD` completion
+     * date (today) is appended — Obsidian-Tasks compatible, and what the
+     * dashboard reads to keep the item visible until that day is over.
      */
     private async completeTask(path: string, task: ActionTask): Promise<void> {
         const file = this.app.vault.getAbstractFileByPath(path);
@@ -2229,8 +2307,25 @@ export default class SystemRecordingPlugin extends Plugin {
             new Notice(t().dashboard.actions.taskMoved);
             return;
         }
-        lines[idx] = lines[idx]!.replace(/\[[^\]]\]/, "[x]");
+        const checked = lines[idx]!.replace(/\[[^\]]\]/, "[x]");
+        lines[idx] = this.appendCompletionDate(checked, this.todayStamp());
         await this.app.vault.modify(file, lines.join("\n"));
+    }
+
+    /**
+     * Appends a `✅ YYYY-MM-DD` completion date to a task line, unless it
+     * already has one. A trailing block reference (` ^id`) is kept at the end
+     * of the line (Obsidian requires it there) with the date inserted before.
+     */
+    private appendCompletionDate(line: string, dateStr: string): string {
+        if (/✅\s*\d{4}-\d{2}-\d{2}/.test(line)) return line;
+        const mark = `✅ ${dateStr}`;
+        const ref = line.match(/(\s+\^[A-Za-z0-9-]+)\s*$/);
+        if (ref) {
+            const head = line.slice(0, line.length - ref[0].length).trimEnd();
+            return `${head} ${mark}${ref[0]}`;
+        }
+        return `${line.trimEnd()} ${mark}`;
     }
 
     /** Nearest scrollable ancestor of an element (the markdown view's scroller). */
