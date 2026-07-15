@@ -37,6 +37,13 @@ export interface DualChannelController {
 	 * Tear down: hide the in-app notice and, unless `keepOs` is set, close the OS
 	 * notification too. Housekeeping sweeps pass `{ keepOs: true }` so the OS
 	 * notification survives in Notification Center.
+	 *
+	 * One-shot: the first call wins. A `{ keepOs: true }` teardown therefore hands
+	 * the OS notification off to Notification Center for good — the caller forgets
+	 * this controller, so a later same-key prompt can't reach back to close it
+	 * (it posts its own instead). That deliberate stacking is the cost of keeping
+	 * a missed prompt recoverable; callers that must replace a prompt (supersede /
+	 * user action) use the default `dispose()` to close the OS notification.
 	 */
 	dispose(opts?: { keepOs?: boolean }): void;
 }
