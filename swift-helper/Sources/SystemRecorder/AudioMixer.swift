@@ -366,6 +366,16 @@ final class AudioMixer: @unchecked Sendable {
         append(pcmBuffer, to: systemStream)
     }
 
+    // MARK: - System audio (from a Core Audio process tap)
+
+    /// System audio delivered as an `AVAudioPCMBuffer` (the process-tap path on
+    /// macOS 14.2+). Shares the systemStream pipeline with `appendSystemAudio`,
+    /// so conversion/downmix to the 24 kHz mono target, temp-file writing, and
+    /// the split "them" sidecar all behave identically to the SCK source.
+    func appendSystemAudioPCM(_ buffer: AVAudioPCMBuffer) {
+        append(buffer, to: systemStream)
+    }
+
     // MARK: - Microphone audio (from AVAudioEngine)
 
     func appendMicrophoneAudio(_ buffer: AVAudioPCMBuffer) {

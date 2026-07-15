@@ -6,7 +6,8 @@ Calendar sync, dual-channel recording via a macOS Swift helper, transcription
 (vendored engine, OpenAI-compatible / LiteLLM endpoints), and LLM enrichment.
 
 Repo: `alvarolobato/obsidian-meeting-copilot`. Platform: macOS only (the
-recorder helper uses ScreenCaptureKit / Core Audio).
+recorder helper captures system audio with a Core Audio process tap on macOS
+14.2+, ScreenCaptureKit on older releases).
 
 ## Repository layout
 
@@ -19,6 +20,7 @@ recorder helper uses ScreenCaptureKit / Core Audio).
   - `src/ui/` — agenda sidebar view and modals.
   - `src/i18n/` — localization; **English is the base language** (`en.ts`). UI strings go through `t()`.
 - `swift-helper/` — the `SystemRecorder` Swift package (dual-channel audio capture). Built into the `system-recorder` binary shipped with the plugin.
+  - System audio: `SystemAudioProcessTap.swift` (Core Audio process tap + private aggregate device, macOS 14.2+) with `AudioCaptureManager.startSystemStream` (ScreenCaptureKit) as the pre-14.2 / failure fallback. Mic: `AVAudioEngine`. Both feed `AudioMixer` (24 kHz mono, `.me`/`.them` split sidecars).
 - `.github/workflows/` — `ci.yml` (PRs + pushes to main) and `release.yml` (version tags).
 - `manifest.json`, `versions.json`, `styles.css`, `esbuild.config.mjs`.
 
@@ -185,6 +187,15 @@ current (e.g. `actions/checkout@v5`, `actions/setup-node@v5`).
   in `src/transcribe/TranscriptionService.ts` + `endpointConfig.ts`; the base
   URL / model overrides are injected via a small seam, not by rewriting vendored
   code. See `src/transcribe/vendor/VENDOR.md`.
+- **System-audio capture:** the process tap (`SystemAudioProcessTap`) is a
+  *private, auto-starting aggregate device* wrapping a `CATapDescription`
+  (global mono mixdown, `.unmuted` so the user still hears the meeting). It's
+  device-independent, so the SCK path's "an app switched the default device and
+  audio went silent" recovery isn't needed here; any tap-creation failure
+  transparently falls back to SCK (which keeps its restart logic). Force the
+  legacy path with `MC_DISABLE_PROCESS_TAP=1` for A/B testing. The tap needs no
+  Screen Recording grant, so the `notifyRecordingError` screen-capture
+  classification in `main.ts` now only fires on the SCK fallback.
 - **i18n:** English is the base. Add UI strings to `src/i18n/en.ts` and use
   `t()`; don't hardcode user-facing strings.
 - **Retention safety:** audio is pruned only when the owning note has the

@@ -11,9 +11,22 @@ final class AudioCaptureManager: NSObject, SCStreamDelegate, @unchecked Sendable
     private var streamOutput: StreamOutput?
     private var audioEngine: AVAudioEngine?
     private var configChangeObserver: NSObjectProtocol?
+    // The Core Audio process tap, when the tap path is active (macOS 14.2+).
+    // Stored as AnyObject because the concrete type is only available on 14.2+
+    // while this class is available from 13.0; it's cast back inside
+    // `if #available` blocks. Nil when the SCK fallback is in use.
+    private var processTap: AnyObject?
+    /// Which system-audio source actually came up, for accurate diagnostics
+    /// (the watchdog's permission hint differs: the tap path needs no Screen
+    /// Recording grant). Set by startSystemAudio(); read on the main flow.
+    private(set) var usingProcessTap = false
 
     // Callbacks for captured audio buffers
     var onSystemAudio: ((CMSampleBuffer) -> Void)?
+    /// System audio from the Core Audio process tap (macOS 14.2+ path), as an
+    /// already-decoded PCM buffer. Wired in addition to `onSystemAudio` so the
+    /// same manager can drive either source.
+    var onSystemAudioPCM: ((AVAudioPCMBuffer) -> Void)?
     var onMicrophoneAudio: ((AVAudioPCMBuffer, AVAudioTime) -> Void)?
     /// Non-fatal capture warnings (e.g. a device-change restart that failed).
     /// The recording keeps going; the plugin surfaces these for visibility.
@@ -133,12 +146,53 @@ final class AudioCaptureManager: NSObject, SCStreamDelegate, @unchecked Sendable
             self?.restartMicEngine()
         }
 
-        try await startSystemStream()
+        try await startSystemAudio()
         try startMicEngine()
         setCapturing(true)
 
         // If stop somehow raced start-up, don't leave capture running.
         if !capturing() { await stopCapture() }
+    }
+
+    // MARK: - System audio (source selection)
+
+    /// Env escape hatch to force the legacy ScreenCaptureKit path even on a
+    /// tap-capable OS (for debugging / A-B comparisons). Any non-empty value.
+    private static var forceLegacySystemAudio: Bool {
+        !(ProcessInfo.processInfo.environment["MC_DISABLE_PROCESS_TAP"] ?? "").isEmpty
+    }
+
+    /// Bring up system-audio capture, preferring the Core Audio process tap on
+    /// macOS 14.2+ and falling back to ScreenCaptureKit. The tap needs no
+    /// Screen Recording permission and is device-change-resilient; if it can't
+    /// be created (older OS, permission, or an API error) we transparently fall
+    /// back to SCK, which keeps working exactly as before.
+    private func startSystemAudio() async throws {
+        if #available(macOS 14.2, *), !Self.forceLegacySystemAudio {
+            do {
+                try startProcessTap()
+                usingProcessTap = true
+                return
+            } catch {
+                // Non-fatal: warn and fall through to the SCK source so a tap
+                // failure never blocks recording.
+                onWarning?(
+                    "System-audio process tap unavailable (\(error.localizedDescription)); using the screen-capture fallback."
+                )
+            }
+        }
+        usingProcessTap = false
+        try await startSystemStream()
+    }
+
+    @available(macOS 14.2, *)
+    private func startProcessTap() throws {
+        let tap = SystemAudioProcessTap()
+        tap.onAudioBuffer = { [weak self] buffer in
+            self?.onSystemAudioPCM?(buffer)
+        }
+        try tap.start()
+        processTap = tap
     }
 
     // MARK: - System audio (ScreenCaptureKit)
@@ -352,6 +406,10 @@ final class AudioCaptureManager: NSObject, SCStreamDelegate, @unchecked Sendable
             self.stream = nil
             self.streamOutput = nil
         }
+        if #available(macOS 14.2, *), let tap = processTap as? SystemAudioProcessTap {
+            tap.stop()
+        }
+        processTap = nil
         teardownMicEngine()
     }
 }

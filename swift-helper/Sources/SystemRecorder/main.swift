@@ -125,9 +125,14 @@ if #available(macOS 13.0, *) {
         fail("Failed to create audio writer: \(error.localizedDescription)")
     }
 
-    // Wire system audio → mixer
+    // Wire system audio → mixer. Both sources are wired; only the one that
+    // actually starts (process tap on macOS 14.2+, else ScreenCaptureKit)
+    // delivers buffers.
     captureManager.onSystemAudio = { sampleBuffer in
         mixer.appendSystemAudio(sampleBuffer)
+    }
+    captureManager.onSystemAudioPCM = { buffer in
+        mixer.appendSystemAudioPCM(buffer)
     }
 
     // Wire microphone audio → mixer
@@ -158,8 +163,13 @@ if #available(macOS 13.0, *) {
     let watchdog = DispatchWorkItem {
         let frames = mixer.capturedFrames
         if frames.system == 0 && frames.mic == 0 {
+            // The tap path needs only Microphone; the SCK fallback also needs
+            // Screen Recording. Name the permissions that actually apply.
+            let permissions = captureManager.usingProcessTap
+                ? "Microphone"
+                : "both Screen Recording and Microphone"
             fail(
-                "No audio captured after \(Int(watchdogSeconds))s. If a meeting app (e.g. Zoom) started after recording, stop and start recording again once it's running. Otherwise grant Obsidian both Screen Recording and Microphone access in System Settings → Privacy & Security and restart Obsidian."
+                "No audio captured after \(Int(watchdogSeconds))s. If a meeting app (e.g. Zoom) started after recording, stop and start recording again once it's running. Otherwise grant Obsidian \(permissions) access in System Settings → Privacy & Security and restart Obsidian."
             )
         } else if inputDeviceUID != nil && frames.mic == 0 && captureManager.micTapActive() {
             // System audio is flowing and a mic tap is live, but the
