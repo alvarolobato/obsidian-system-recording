@@ -7,8 +7,8 @@ A Granola-style meeting workflow for Obsidian on macOS. Meeting Copilot reads yo
 - macOS 13.0+ (Apple Silicon)
 - Obsidian Desktop
 - A Google account (for calendar integration)
-- An OpenAI-compatible endpoint (configured as a single base URL in settings). It's used for **enrichment**, and for transcription **unless** you switch to the local on-device backend. OpenAI and LiteLLM work for both transcription and enrichment. **Ollama** has no `/audio/transcriptions` endpoint, so it works for enrichment only. **Azure** requires the `/openai/v1` OpenAI-compatible surface — the classic deployment-path format won't work.
-  - Prefer to keep audio local? Set **Transcription → Backend** to **Local** and no endpoint is needed for transcription (enrichment still uses one). See [Local (on-device) transcription](#local-on-device-transcription).
+- An OpenAI-compatible endpoint (configured as a single base URL in settings), needed for **AI enrichment** and for **remote** transcription. It's **not** required if you transcribe locally and leave enrichment off. OpenAI and LiteLLM work for both transcription and enrichment. **Ollama** has no `/audio/transcriptions` endpoint, so it works for enrichment only. **Azure** requires the `/openai/v1` OpenAI-compatible surface — the classic deployment-path format won't work.
+  - Prefer to keep audio local? Set **Transcription → Transcription engine** to **Local (on-device Whisper)** and no endpoint is needed for transcription. See [Local (on-device) transcription](#local-on-device-transcription).
 
 ## Features
 
@@ -17,7 +17,7 @@ A Granola-style meeting workflow for Obsidian on macOS. Meeting Copilot reads yo
 - **Meeting agenda sidebar** — a "coming up / recent" list with per-row actions: create note + record, open note, transcribe, enrich, open recording, join link.
 - **Automatic notes** — creates a meeting note from the invite, colocates the recording with it, and files recurring meetings into a per-series folder.
 - **Transcript → note automation** — when a recording stops it can transcribe automatically and drop a collapsible transcript at the bottom of the note.
-- **Local on-device transcription** — optionally transcribe with a bundled Whisper model that runs on Apple-Silicon GPUs (Metal); audio never leaves your Mac and there's no per-minute API cost. Falls back to your remote endpoint on failure if you enable it.
+- **Local on-device transcription** — optionally transcribe with a local Whisper model (downloaded once) that runs on Apple-Silicon GPUs (Metal); audio never leaves your Mac and there's no per-minute API cost. Falls back to your remote endpoint on failure if you enable it.
 - **Granola-style AI enrichment** — generates a summary, key points, decisions, and action items into a gray, collapsible AI-notes callout you can toggle on/off; your manual notes stay untouched.
 - **Action items → tasks** — enrichment lifts action items into `## Action items` checkboxes the [Tasks](https://github.com/obsidian-tasks-group/obsidian-tasks) plugin can track.
 - **Recording retention** — recordings older than a configurable number of days are moved to the trash automatically; the transcript stays in the note.
@@ -33,7 +33,7 @@ Meeting Copilot handles calendar, recording, transcription, and enrichment on it
 | [Dataview](https://github.com/blacksmithgu/obsidian-dataview) | The Meetings dashboard command | Optional |
 | [Tasks](https://github.com/obsidian-tasks-group/obsidian-tasks) | Tracking the `## Action items` checkboxes | Optional (checkboxes work without it) |
 
-> Transcription and enrichment share one endpoint configured in Meeting Copilot's own settings. The endpoint must be OpenAI-compatible and serve both `/audio/transcriptions` and `/chat/completions`. OpenAI and a LiteLLM proxy work for both. Ollama works for enrichment only (no `/audio/transcriptions`). Azure works only via the newer OpenAI-compatible surface (`/openai/v1`), not the classic deployment-path format. The transcription engine itself is bundled (vendored from [AI Transcriber](https://github.com/mssoftjp/obsidian-ai-transcriber), MIT); AI Transcriber does **not** need to be installed.
+> **Remote** transcription and AI enrichment share one OpenAI-compatible endpoint configured in Meeting Copilot's own settings: remote transcription needs `/audio/transcriptions` and enrichment needs `/chat/completions`. OpenAI and a LiteLLM proxy serve both. Ollama works for enrichment only (no `/audio/transcriptions`). Azure works only via the newer OpenAI-compatible surface (`/openai/v1`), not the classic deployment-path format. If you switch to the **local** transcription engine, no endpoint is needed for transcription (only for enrichment, when enabled). The remote transcription engine is bundled (vendored from [AI Transcriber](https://github.com/mssoftjp/obsidian-ai-transcriber), MIT); AI Transcriber does **not** need to be installed.
 
 ## Installation
 
@@ -41,14 +41,14 @@ Meeting Copilot handles calendar, recording, transcription, and enrichment on it
 
 **Option B — manual:**
 
-1. From the [latest release](https://github.com/alvarolobato/obsidian-meeting-copilot/releases/latest), download `main.js`, `manifest.json`, `styles.css` (and optionally the `system-recorder` helper).
+1. From the [latest release](https://github.com/alvarolobato/obsidian-meeting-copilot/releases/latest), download `main.js`, `manifest.json`, `styles.css` (and optionally the `system-recorder` helper — if you grab it, also grab the `whisper` runtime asset next to it, since the helper won't launch without it).
 2. Copy them into `.obsidian/plugins/meeting-copilot/` in your vault.
 3. In Obsidian, enable **Meeting Copilot** under *Settings → Community plugins*.
 
 Then, regardless of method:
 
 4. Optionally install the plugins from the table above (Dataview, Tasks).
-5. On your first recording, the macOS helper (`system-recorder`) is downloaded from the matching release and verified (SHA-256) if you didn't already copy it in. macOS then prompts for **Screen Recording** and **Microphone** permissions — grant both, then fully quit and reopen Obsidian. (Apple Silicon / arm64 only.)
+5. On your first recording, the macOS helper (`system-recorder`) and its `whisper` runtime component are downloaded from the matching release and verified (SHA-256) if you didn't already copy them in. macOS then prompts for **Screen Recording** and **Microphone** permissions — grant both, then fully quit and reopen Obsidian. (Apple Silicon / arm64 only.)
 
 ### Updating
 
@@ -68,14 +68,14 @@ Your **client secret** and the OAuth **tokens** are stored in per-vault local st
 
 ### AI endpoint (shared)
 
-In *Settings → Meeting Copilot → AI endpoint (shared)*, set the **API base URL** and **API key** for your OpenAI-compatible endpoint. These are used for **both** transcription and enrichment.
+In *Settings → Meeting Copilot → AI endpoint (shared)*, set the **API base URL** and **API key** for your OpenAI-compatible endpoint. These are used for **AI enrichment** and for **remote** transcription. If you use the local transcription engine and don't enrich, you can leave them blank.
 
 ### Transcription
 
-In *Settings → Meeting Copilot → Transcription*, choose a **Backend**:
+In *Settings → Meeting Copilot → Transcription*, choose a **Transcription engine**:
 
-- **Remote (default)** — pick a **Transcription model** (`gpt-4o-transcribe` is most accurate; `whisper-1-ts` adds word timestamps) served by your shared endpoint, a language, and optionally enable **AI post-processing** and a **custom dictionary** (one `misheard => correct` rule per line).
-- **Local (on-device)** — pick a **Whisper model** (see the table below); it downloads once and is verified by SHA-256. See [Local (on-device) transcription](#local-on-device-transcription).
+- **Remote (API endpoint)** *(default)* — pick a **Transcription model** (`gpt-4o-transcribe` is most accurate; `whisper-1-ts` adds word timestamps) served by your shared endpoint, a language, and optionally enable **AI post-processing** and a **custom dictionary** (one `misheard => correct` rule per line).
+- **Local (on-device Whisper)** — pick a **Local model** (see the table below); it downloads once and is verified by SHA-256. See [Local (on-device) transcription](#local-on-device-transcription).
 
 Either way, transcription runs headlessly — no dialog — when you transcribe a recording or when *Auto-transcribe when recording stops* is on.
 
@@ -85,24 +85,26 @@ In *Settings → Meeting Copilot → AI enrichment*, enable enrichment, then cli
 
 ### Local (on-device) transcription
 
-Set **Transcription → Backend** to **Local** to transcribe entirely on your Mac with a bundled [whisper.cpp](https://github.com/ggerganov/whisper.cpp) model running on the Apple-Silicon GPU (Metal). Audio never leaves the device and there's no per-minute API cost — enrichment still uses your shared endpoint.
+Set **Transcription → Transcription engine** to **Local (on-device Whisper)** to transcribe entirely on your Mac with a local [whisper.cpp](https://github.com/ggerganov/whisper.cpp) model running on the Apple-Silicon GPU (Metal). Audio never leaves the device and there's no per-minute API cost — enrichment still uses your shared endpoint when enabled.
 
-First use downloads two things and verifies each by pinned SHA-256: a small **recorder runtime component** (`whisper` framework) alongside the `system-recorder` helper, and the **model** you selected (into the plugin's `models/` folder). After that, transcription is fully offline. Only **multilingual** models are offered, so the **Language** setting (`auto` to detect) works as expected.
+On your first local transcription the selected **Local model** downloads into the plugin's `models/` folder (unless already present) and is verified by a pinned SHA-256; after that, transcription is fully offline. The `system-recorder` helper and its `whisper` runtime component download the first time the helper runs at all — often your first *recording*, not your first local transcription — and are verified the same way. Only **multilingual** models are offered, so the **Language** setting (`auto` to detect) works as expected.
 
-| Model | Download | Peak RAM (approx.) | Notes |
+| Local model | Download | Peak RAM (approx.) | Notes |
 | --- | --- | --- | --- |
 | `small-q5_1` | ~190 MB | ~0.6 GB | Fastest / smallest; best for older or RAM-constrained Macs. |
 | `medium-q5_0` | ~539 MB | ~1.6 GB | Middle ground. |
 | `large-v3-turbo-q5_0` *(default)* | ~574 MB | ~1.6 GB | Near large-v3 accuracy at a fraction of the compute; recommended on Max-tier chips. |
 
+The RAM column is a conservative planning estimate; actual peak resident memory is often lower (see Performance below).
+
 Other options in this mode:
 
-- **Speaker separation (diarization)** — because recording is dual-channel (you vs. everyone else), enabling it labels the two sides without any timestamp-capability probe.
+- **Speaker separation** — because recording is dual-channel (you vs. everyone else), enabling it labels the two sides. It transcribes each channel in its own pass, so it roughly doubles the transcription time versus the mixed track.
 - **Fall back to remote** — if a local run fails and a remote endpoint is configured, retry the audio there (non-diarized). Off by default; when it triggers you'll see a "falling back to the remote service" notice.
 
-Switching models or backends is locked while a model is downloading so an in-flight fetch can't be stranded.
+Switching the transcription engine or the local model is locked while a model is downloading so an in-flight fetch can't be stranded.
 
-**Performance.** On-device transcription runs on the GPU and is typically **much faster than real time**. On an Apple M5 Max (64 GB) the default `large-v3-turbo-q5_0` model transcribed at **~56× real time** (363 s of audio in 6.4 s; a dual-channel pass reuses the loaded model, so it's ~2× that wall time). In practice a **1-hour dual-channel meeting transcribes in roughly 2 minutes**, entirely offline, at ~0.8 GB peak RAM. Slower/lower-RAM Macs will be proportionally slower — pick `small-q5_1` or `medium-q5_0` there. Wall-clock varies by chip, model, and meeting length.
+**Performance.** On-device transcription runs on the GPU and is typically **much faster than real time**. On one Apple M5 Max (64 GB), the default `large-v3-turbo-q5_0` model transcribed a single track at **~56× real time** (363 s of audio in 6.4 s) at **~0.8 GB peak resident memory** — comfortably under the table's conservative ~1.6 GB estimate. The model loads once and is reused across jobs, so a two-pass **speaker-separated** run is ~2× that wall time. Rules of thumb from these numbers: a 1-hour meeting is **~1 minute** transcribed as a single mixed track, or **~2 minutes** with speaker separation on. Slower / lower-RAM Macs will be proportionally slower — pick `small-q5_1` or `medium-q5_0` there. These are one machine's figures; wall-clock varies by chip, model, and meeting length.
 
 ## Usage
 
@@ -119,8 +121,8 @@ Switching models or backends is locked while a model is downloading so an in-fli
 - **Handle 1:1s separately** / **One-on-one folder**: file 1:1s (exactly one other attendee) into their own per-person folder instead of the rules above.
 - **Ad-hoc meetings folder**: where unplanned (ad-hoc or detected) meeting notes land.
 - **Recording retention (days)**: recordings older than this are trashed on startup and via *Clean up old recordings*; `0` keeps them forever. A recording is pruned only when the plugin has durably saved the transcript into its owning meeting note — so notes without the transcript captured (e.g. enriched with *Insert transcript* off), orphan/ad-hoc recordings, and unrelated audio are never deleted.
-- **AI endpoint (shared)**: OpenAI-compatible base URL + API key used for both transcription and enrichment.
-- **Transcription**: **backend** (remote endpoint or local on-device Whisper), model / local Whisper model, language, speaker separation, voice-activity detection, AI post-processing, custom dictionary, **fall back to remote** (local backend), and **Auto-transcribe when recording stops** (headless — no dialog).
+- **AI endpoint (shared)**: OpenAI-compatible base URL + API key used for AI enrichment and for remote transcription (not needed for the local engine).
+- **Transcription**: **Transcription engine** (*Remote (API endpoint)* or *Local (on-device Whisper)*), a transcription model (remote) or **Local model** (local), language, and **speaker separation**. Remote-only: AI post-processing and custom dictionary. Local-only: **fall back to remote**. Plus **Auto-transcribe when recording stops** (headless — no dialog).
 - **AI enrichment**: enable it, pick a chat model (via **Test connection** + dropdown); optionally enrich automatically after transcription.
 - **Action items as tasks**: lift enriched action items into `## Action items` checkboxes (preserving existing/completed tasks).
 

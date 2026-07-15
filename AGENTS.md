@@ -152,11 +152,15 @@ dylib into the **exact release layout** —
 build's absolute symlink) — so the deployed plugin is self-contained and matches
 what `AssetProvisioner` writes for shipped users. The helper resolves it via an
 `@loader_path` rpath at launch, so a missing/misplaced dylib fails dyld **before
-`main()`** — breaking recording, not just transcription. `EXPECTED_WHISPER_SHA256`
-/ `WHISPER_DYLIB_SIZE` in `src/binary.ts` are placeholders on `main`, re-pinned
-by `release.yml`, same as the binary sha — don't commit local values. Local
-Whisper **models** are downloaded on demand into the plugin's `models/` dir and
-pinned by SHA-256 in `localModels.ts`; they're never bundled or deployed.
+`main()`** — breaking recording, not just transcription. Unlike the binary's
+`EXPECTED_SHA256` (a `main` placeholder that `release.yml` **re-pins** at tag
+time), `EXPECTED_WHISPER_SHA256` / `WHISPER_DYLIB_SIZE` in `src/binary.ts` are
+**fixed committed constants** for the pinned XCFramework: `release.yml` only
+*verifies* the freshly built dylib against them and fails loudly on a mismatch,
+so refresh both by hand when you bump the XCFramework (never a `deploy-local`
+placeholder). Local Whisper **models** are downloaded on demand into the
+plugin's `models/` dir and pinned by SHA-256 in `localModels.ts`; they're never
+bundled or deployed.
 
 **Screen Recording permission (macOS/TCC):** with `--swift` the binary's code
 hash changes, so macOS may treat it as new and require re-granting permission.

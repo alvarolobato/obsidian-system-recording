@@ -192,7 +192,7 @@ describe("WhisperCppBackend", () => {
 		expect(result!.text).toBe("clean");
 	});
 
-	it("defaults the manifest language to 'auto' when none is configured", async () => {
+	it("defaults the manifest language to 'auto' when the config language is empty", async () => {
 		let latest: FakeProcess | undefined;
 		const manifests: string[] = [];
 		const backend = new WhisperCppBackend(
