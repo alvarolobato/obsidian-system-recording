@@ -60,7 +60,9 @@ export async function transcribeAudio(
 		signal,
 		onProgress,
 	});
-	return results[0]?.text ?? "";
+	// Select by job id rather than position: a backend's result order is not
+	// part of the contract (mirrors how the diarized path looks up me/them).
+	return results.find((r) => r.id === "single")?.text ?? "";
 }
 
 export interface DiarizedResult {
