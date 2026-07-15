@@ -211,6 +211,14 @@ export const en = {
 				summary: "summary",
 			},
 		},
+		controls: {
+			perPage: "Per page",
+			prev: "Previous",
+			next: "Next",
+			refresh: "Refresh",
+			pageOf: (current: number, total: number) =>
+				`${current} / ${total}`,
+		},
 		meetings: {
 			upcomingCount: (n: number) =>
 				`${n} upcoming meeting${n === 1 ? "" : "s"}`,
@@ -220,19 +228,20 @@ export const en = {
 			pastEmpty: "No past meetings yet.",
 			loading: "Loading calendar…",
 			calendarError: "Couldn't load calendar meetings; showing notes only.",
-			refresh: "Refresh",
-			perPage: "Per page",
 			colMeeting: "Meeting",
 			colDate: "Date",
 			colStatus: "Status",
-			colRec: "Rec",
 			colActions: "Actions",
 			noNote: "No note",
 			createNote: "Create note",
-			prev: "Previous",
-			next: "Next",
-			pageOf: (current: number, total: number) =>
-				`Page ${current} of ${total}`,
+			openRecording: "Open recording",
+		},
+		actions: {
+			count: (n: number) =>
+				`${n} open action item${n === 1 ? "" : "s"}`,
+			empty: "No open action items.",
+			loading: "Scanning notes…",
+			taskMoved: "That task has changed in its note; refreshing.",
 		},
 	},
 	settings: {

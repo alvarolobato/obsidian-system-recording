@@ -11,17 +11,18 @@ export const UPCOMING_BLOCK_LANG = "meeting-copilot-upcoming";
 /** Fenced code-block language rendered by the plugin's paginated "Past meetings" processor. */
 export const PAST_BLOCK_LANG = "meeting-copilot-past";
 
+/** Fenced code-block language rendered by the plugin's paginated "Open action items" processor. */
+export const ACTIONS_BLOCK_LANG = "meeting-copilot-actions";
+
 /**
- * Builds the managed dashboard block. "Upcoming meetings" and "Past meetings"
- * are plugin-rendered blocks (not Dataview): each merges the vault's meeting
- * notes with the calendar events the agenda already loads, so meetings without
- * a note yet still appear (with a "create note" action), and each offers a
- * per-page dropdown + pagination — none of which a Dataview `TABLE` can do.
- * "Open action items" stays on Dataview (a vault-wide task query, gated to
- * meeting notes by `event_id`/`meeting_url`; it reads the fields via
- * `file.frontmatter` because tasks stopped inheriting page fields in newer
- * Dataview releases). "Needs attention" is likewise plugin-rendered. Pure so it
- * can be tested without a vault.
+ * Builds the managed dashboard block. Every section is plugin-rendered — not
+ * Dataview — so each can offer a per-page dropdown + pagination and richer
+ * layout than a `TABLE`/`TASK` query allows. "Upcoming"/"Past meetings" merge
+ * the vault's meeting notes with the calendar events the agenda already loads
+ * (meetings with no note yet still appear, with a "create note" action). "Open
+ * action items" lists every note's open tasks vault-wide, newest note first.
+ * "Needs attention" surfaces meetings that haven't finished the pipeline. Pure
+ * so it can be tested without a vault.
  */
 export function buildDashboardBlock(): string {
 	return [
@@ -39,9 +40,9 @@ export function buildDashboardBlock(): string {
 		"```",
 		"",
 		"## Open action items",
-		"```dataview",
-		"TASK WHERE !completed AND (file.frontmatter.event_id OR file.frontmatter.meeting_url)",
-		"GROUP BY file.link",
+		// Rendered by the plugin: open tasks from every note in the vault,
+		// grouped by note (newest first), dense and paginated.
+		"```" + ACTIONS_BLOCK_LANG,
 		"```",
 		"",
 		"## Needs attention",

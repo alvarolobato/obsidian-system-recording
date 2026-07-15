@@ -1,4 +1,4 @@
-import { FileSystemAdapter, MarkdownView, Menu, normalizePath, Notice, Platform, Plugin, setIcon, TFile } from "obsidian";
+import { Component, FileSystemAdapter, MarkdownRenderer, MarkdownView, Menu, normalizePath, Notice, Platform, Plugin, setIcon, TFile } from "obsidian";
 import {
     DEFAULT_SETTINGS,
     inferSttApiType,
@@ -53,6 +53,7 @@ import {
 import { extractActionItems, refreshActionItems } from "./notes/actionItems";
 import { normalizeManualNotes } from "./notes/manualNotes";
 import {
+    ACTIONS_BLOCK_LANG,
     ATTENTION_BLOCK_LANG,
     buildDashboardBlock,
     PAST_BLOCK_LANG,
@@ -67,7 +68,14 @@ import {
     PAGE_SIZE_OPTIONS,
     paginate,
     type DashboardMeetingInput,
+    type Page,
 } from "./notes/dashboardMeetings";
+import {
+    countTasks,
+    sortActionNoteGroups,
+    type ActionNoteGroup,
+    type ActionTask,
+} from "./notes/dashboardActions";
 import type { GCalEvent } from "./calendar/googleCalendar";
 import { findExpiredRecordings, underFolder } from "./recordings/retention";
 
@@ -304,6 +312,13 @@ export default class SystemRecordingPlugin extends Plugin {
         this.registerMarkdownCodeBlockProcessor(
             PAST_BLOCK_LANG,
             (_src, el) => void this.renderMeetingsSection(el, "past")
+        );
+
+        // "Open action items" dashboard section: open tasks from every note in
+        // the vault, grouped by note (newest first), dense and paginated.
+        this.registerMarkdownCodeBlockProcessor(
+            ACTIONS_BLOCK_LANG,
+            (_src, el) => void this.renderActionItems(el)
         );
 
         // Status bar
@@ -1807,38 +1822,6 @@ export default class SystemRecordingPlugin extends Plugin {
 
         el.empty();
 
-        const header = el.createDiv({ cls: "mc-meetings-header" });
-        header.createSpan({
-            text:
-                direction === "past"
-                    ? d.pastCount(view.total)
-                    : d.upcomingCount(view.total),
-        });
-        const controls = header.createDiv({ cls: "mc-meetings-controls" });
-        controls.createSpan({ text: d.perPage });
-        const select = controls.createEl("select", { cls: "dropdown" });
-        for (const opt of PAGE_SIZE_OPTIONS) {
-            select.createEl("option", {
-                text: String(opt),
-                value: String(opt),
-            });
-        }
-        select.value = String(pageSize);
-        select.onchange = (): void => {
-            const chosen = normalizePageSize(Number(select.value));
-            if (direction === "past") {
-                this.settings.dashboardPastPageSize = chosen;
-            } else {
-                this.settings.dashboardUpcomingPageSize = chosen;
-            }
-            void this.saveSettings();
-            // A different page size shifts every boundary; start over at page 1.
-            void this.renderMeetingsSection(el, direction, 1);
-        };
-        const refresh = controls.createEl("button", { text: d.refresh });
-        refresh.onclick = (): void =>
-            void this.renderMeetingsSection(el, direction, view.page, true);
-
         if (calendarError) {
             el.createEl("p", {
                 text: d.calendarError,
@@ -1851,86 +1834,362 @@ export default class SystemRecordingPlugin extends Plugin {
                 text: direction === "past" ? d.pastEmpty : d.upcomingEmpty,
                 cls: "mc-meetings-empty",
             });
-            return;
-        }
-
-        const table = el.createEl("table", { cls: "mc-meetings" });
-        const head = table.createEl("thead").createEl("tr");
-        for (const h of [
-            d.colMeeting,
-            d.colDate,
-            d.colStatus,
-            d.colRec,
-            d.colActions,
-        ]) {
-            head.createEl("th", { text: h });
-        }
-        const body = table.createEl("tbody");
-        const pad = (n: number): string => String(n).padStart(2, "0");
-        const fmtDate = (dt: Date): string =>
-            `${dt.getFullYear()}-${pad(dt.getMonth() + 1)}-${pad(
-                dt.getDate()
-            )} ${pad(dt.getHours())}:${pad(dt.getMinutes())}`;
-
-        for (const row of view.rows) {
-            const tr = body.createEl("tr");
-            const nameTd = tr.createEl("td");
-            const file = row.notePath ? notesByPath.get(row.notePath) : null;
-            if (file) {
-                const link = nameTd.createEl("a", {
-                    text: row.title,
-                    cls: "internal-link",
-                });
-                link.onclick = (e): void => {
-                    e.preventDefault();
-                    this.openFileInTab(file);
-                };
-            } else {
-                // No note yet: plain (non-link) title, explicitly marked, so
-                // it's clear this row isn't backed by a note.
-                nameTd.createSpan({
-                    text: row.title,
-                    cls: "mc-meeting-nonote",
-                });
+        } else {
+            const table = el.createEl("table", { cls: "mc-meetings" });
+            const head = table.createEl("thead").createEl("tr");
+            for (const h of [d.colMeeting, d.colDate, d.colStatus, d.colActions]) {
+                head.createEl("th", { text: h });
             }
+            const body = table.createEl("tbody");
+            const pad = (n: number): string => String(n).padStart(2, "0");
+            const fmtDate = (dt: Date): string =>
+                `${dt.getFullYear()}-${pad(dt.getMonth() + 1)}-${pad(
+                    dt.getDate()
+                )} ${pad(dt.getHours())}:${pad(dt.getMinutes())}`;
 
-            tr.createEl("td", { text: fmtDate(row.start) });
-            tr.createEl("td", {
-                text: row.notePath ? row.status : d.noNote,
+            for (const row of view.rows) {
+                const tr = body.createEl("tr");
+                const nameTd = tr.createEl("td");
+                const file = row.notePath
+                    ? notesByPath.get(row.notePath)
+                    : null;
+                if (file) {
+                    const link = nameTd.createEl("a", {
+                        text: row.title,
+                        cls: "internal-link",
+                    });
+                    link.onclick = (e): void => {
+                        e.preventDefault();
+                        this.openFileInTab(file);
+                    };
+                } else {
+                    // No note yet: plain (non-link) title, explicitly marked,
+                    // so it's clear this row isn't backed by a note.
+                    nameTd.createSpan({
+                        text: row.title,
+                        cls: "mc-meeting-nonote",
+                    });
+                }
+
+                tr.createEl("td", { text: fmtDate(row.start) });
+                tr.createEl("td", { text: row.notePath ? row.status : d.noNote });
+
+                // Merged actions column (formerly a separate "Rec" indicator):
+                // a note-less row offers "create note"; a noted row with a
+                // recording offers to open it (the old 🎙️ was just a
+                // non-actionable status marker, redundant with the Status
+                // column, so it's now a real action).
+                const actTd = tr.createEl("td", { cls: "mc-meetings-actions" });
+                const meeting = meetingsByKey.get(row.key);
+                if (!row.notePath && meeting) {
+                    const create = actTd.createEl("a", {
+                        text: d.createNote,
+                        cls: "mc-create-note",
+                    });
+                    create.onclick = (e): void => {
+                        e.preventDefault();
+                        void this.createNoteOnly(meeting).then(() =>
+                            this.renderMeetingsSection(el, direction, view.page)
+                        );
+                    };
+                } else if (file && row.hasRecording) {
+                    const rec = actTd.createEl("button", {
+                        cls: "mc-icon-btn",
+                    });
+                    setIcon(rec, "mic");
+                    rec.setAttribute("aria-label", d.openRecording);
+                    rec.onclick = (): void =>
+                        void this.openRecording(
+                            this.agendaMeetingFromNote(file)
+                        );
+                }
+            }
+        }
+
+        this.renderDashToolbar(el, {
+            countText:
+                direction === "past"
+                    ? d.pastCount(view.total)
+                    : d.upcomingCount(view.total),
+            pageSize,
+            view,
+            onPageSize: (n): void => {
+                if (direction === "past") {
+                    this.settings.dashboardPastPageSize = n;
+                } else {
+                    this.settings.dashboardUpcomingPageSize = n;
+                }
+                void this.saveSettings();
+                // A different page size shifts every boundary; back to page 1.
+                void this.renderMeetingsSection(el, direction, 1);
+            },
+            onGoTo: (p): void => void this.renderMeetingsSection(el, direction, p),
+            onRefresh: (): void =>
+                void this.renderMeetingsSection(el, direction, view.page, true),
+        });
+    }
+
+    /**
+     * Shared bottom toolbar for the dashboard's paginated sections: a count on
+     * the left, and on the right the per-page dropdown, prev/next + "page x of
+     * y" (only when there's more than one page), and a circular refresh icon.
+     * Callbacks re-render the owning section.
+     */
+    private renderDashToolbar(
+        parent: HTMLElement,
+        opts: {
+            countText: string;
+            pageSize: number;
+            view: Page<unknown>;
+            onPageSize: (size: number) => void;
+            onGoTo: (page: number) => void;
+            onRefresh: () => void;
+        }
+    ): void {
+        const c = t().dashboard.controls;
+        const bar = parent.createDiv({ cls: "mc-dash-toolbar" });
+        bar.createSpan({ cls: "mc-dash-count", text: opts.countText });
+
+        const right = bar.createDiv({ cls: "mc-dash-toolbar-right" });
+
+        const perPage = right.createDiv({ cls: "mc-dash-perpage" });
+        perPage.createSpan({ text: c.perPage });
+        const select = perPage.createEl("select", { cls: "dropdown" });
+        for (const size of PAGE_SIZE_OPTIONS) {
+            select.createEl("option", {
+                text: String(size),
+                value: String(size),
             });
-            tr.createEl("td", { text: row.hasRecording ? "🎙️" : "" });
-
-            const actTd = tr.createEl("td", { cls: "mc-meetings-actions" });
-            const meeting = meetingsByKey.get(row.key);
-            if (!row.notePath && meeting) {
-                const create = actTd.createEl("a", {
-                    text: d.createNote,
-                    cls: "mc-create-note",
-                });
-                create.onclick = (e): void => {
-                    e.preventDefault();
-                    void this.createNoteOnly(meeting).then(() =>
-                        this.renderMeetingsSection(el, direction, view.page)
-                    );
-                };
-            }
         }
+        select.value = String(opts.pageSize);
+        select.onchange = (): void =>
+            opts.onPageSize(normalizePageSize(Number(select.value)));
 
-        if (view.pageCount > 1) {
-            const nav = el.createDiv({ cls: "mc-pagination" });
-            const prev = nav.createEl("button", { text: d.prev });
-            prev.disabled = view.page <= 1;
-            prev.onclick = (): void =>
-                void this.renderMeetingsSection(el, direction, view.page - 1);
+        if (opts.view.pageCount > 1) {
+            const nav = right.createDiv({ cls: "mc-pagination" });
+            const prev = nav.createEl("button", { cls: "mc-icon-btn" });
+            setIcon(prev, "chevron-left");
+            prev.setAttribute("aria-label", c.prev);
+            prev.disabled = opts.view.page <= 1;
+            prev.onclick = (): void => opts.onGoTo(opts.view.page - 1);
             nav.createSpan({
                 cls: "mc-pagination-status",
-                text: d.pageOf(view.page, view.pageCount),
+                text: c.pageOf(opts.view.page, opts.view.pageCount),
             });
-            const next = nav.createEl("button", { text: d.next });
-            next.disabled = view.page >= view.pageCount;
-            next.onclick = (): void =>
-                void this.renderMeetingsSection(el, direction, view.page + 1);
+            const next = nav.createEl("button", { cls: "mc-icon-btn" });
+            setIcon(next, "chevron-right");
+            next.setAttribute("aria-label", c.next);
+            next.disabled = opts.view.page >= opts.view.pageCount;
+            next.onclick = (): void => opts.onGoTo(opts.view.page + 1);
         }
+
+        const refresh = right.createEl("button", { cls: "mc-icon-btn" });
+        setIcon(refresh, "refresh-cw");
+        refresh.setAttribute("aria-label", c.refresh);
+        refresh.onclick = (): void => opts.onRefresh();
+    }
+
+    /** Per-action-items-block Component owning the current render's task markdown. */
+    private actionRenderers: WeakMap<HTMLElement, Component> = new WeakMap();
+
+    /**
+     * Renders the dashboard's "Open action items" section: every note in the
+     * vault that still has open (`- [ ]`) tasks, grouped by note and ordered
+     * newest note first, kept dense and paginated (by note). Each group shows a
+     * small linked title + date and its open tasks; ticking a task marks it
+     * done in the source note and re-renders. `page` is 1-based (by note).
+     */
+    private async renderActionItems(el: HTMLElement, page = 1): Promise<void> {
+        const a = t().dashboard.actions;
+        el.empty();
+        el.createEl("p", { text: a.loading, cls: "mc-actions-loading" });
+
+        // A short-lived child owns the tasks' rendered markdown so its
+        // sub-views are torn down on the next render (or when the dashboard
+        // closes), rather than piling up on the long-lived plugin instance.
+        const prevRenderer = this.actionRenderers.get(el);
+        if (prevRenderer) prevRenderer.unload();
+        const renderer = new Component();
+        renderer.load();
+        this.actionRenderers.set(el, renderer);
+
+        const groups = sortActionNoteGroups(await this.scanOpenTaskNotes());
+        const pageSize = normalizePageSize(
+            this.settings.dashboardActionsPageSize
+        );
+        const view = paginate(groups, pageSize, page);
+
+        el.empty();
+
+        if (view.total === 0) {
+            el.createEl("p", { text: a.empty, cls: "mc-actions-empty" });
+        } else {
+            const list = el.createDiv({ cls: "mc-actions-list" });
+            for (const group of view.rows) {
+                this.renderActionNote(list, group, el, view.page, renderer);
+            }
+        }
+
+        this.renderDashToolbar(el, {
+            countText: a.count(countTasks(groups)),
+            pageSize,
+            view,
+            onPageSize: (n): void => {
+                this.settings.dashboardActionsPageSize = n;
+                void this.saveSettings();
+                void this.renderActionItems(el, 1);
+            },
+            onGoTo: (p): void => void this.renderActionItems(el, p),
+            onRefresh: (): void => void this.renderActionItems(el, view.page),
+        });
+    }
+
+    /** Renders one note's group of open tasks in the action-items list. */
+    private renderActionNote(
+        parent: HTMLElement,
+        group: ActionNoteGroup,
+        sectionEl: HTMLElement,
+        page: number,
+        renderer: Component
+    ): void {
+        const note = parent.createDiv({ cls: "mc-action-note" });
+        const header = note.createDiv({ cls: "mc-action-note-header" });
+        const file = this.app.vault.getAbstractFileByPath(group.path);
+        const title = header.createEl("a", {
+            cls: "mc-action-note-title internal-link",
+            text: group.title,
+        });
+        title.onclick = (e): void => {
+            e.preventDefault();
+            if (file instanceof TFile) this.openFileInTab(file);
+        };
+        if (group.date) {
+            const dt = group.date;
+            const pad = (n: number): string => String(n).padStart(2, "0");
+            header.createSpan({
+                cls: "mc-action-note-date",
+                text: `${dt.getFullYear()}-${pad(dt.getMonth() + 1)}-${pad(
+                    dt.getDate()
+                )}`,
+            });
+        }
+
+        const ul = note.createEl("ul", { cls: "mc-action-tasks" });
+        for (const task of group.tasks) {
+            const li = ul.createEl("li", { cls: "mc-action-task" });
+            const cb = li.createEl("input", {
+                cls: "mc-action-task-check",
+                type: "checkbox",
+            });
+            cb.onclick = (): void => {
+                cb.disabled = true;
+                void this.completeTask(group.path, task).then(() =>
+                    this.renderActionItems(sectionEl, page)
+                );
+            };
+            const text = li.createSpan({ cls: "mc-action-task-text" });
+            // Render the task's markdown (bold owners, links) inline.
+            void MarkdownRenderer.render(
+                this.app,
+                task.text,
+                text,
+                group.path,
+                renderer
+            );
+        }
+    }
+
+    /**
+     * Scans every note in the vault for open (`- [ ]`) tasks via the metadata
+     * cache (only reading files that actually have one), returning a group per
+     * note with its title, origin date, and task lines. Kept whole-vault on
+     * purpose: action items live in meeting notes wherever they came from
+     * (including Granola-synced notes, which carry no `event_id`).
+     */
+    private async scanOpenTaskNotes(): Promise<ActionNoteGroup[]> {
+        const cleanTaskText = (raw: string): string =>
+            raw.replace(/^\s*[-*+]\s+\[[^\]]\]\s*/, "").trim();
+        const groups: ActionNoteGroup[] = [];
+        for (const file of this.app.vault.getMarkdownFiles()) {
+            const cache = this.app.metadataCache.getFileCache(file);
+            const openLines = (cache?.listItems ?? [])
+                .filter((it) => it.task === " ")
+                .map((it) => it.position.start.line);
+            if (openLines.length === 0) continue;
+
+            const lines = (await this.app.vault.cachedRead(file)).split("\n");
+            const tasks: ActionTask[] = [];
+            for (const line of openLines) {
+                const raw = lines[line];
+                if (raw === undefined) continue;
+                tasks.push({ line, raw, text: cleanTaskText(raw) });
+            }
+            if (tasks.length === 0) continue;
+
+            const fm = cache?.frontmatter as
+                | Record<string, unknown>
+                | undefined;
+            const titleRaw = fm?.["title"];
+            const title =
+                typeof titleRaw === "string" && titleRaw
+                    ? titleRaw
+                    : file.basename;
+            groups.push({
+                path: file.path,
+                title,
+                date: this.resolveNoteDate(file, fm),
+                tasks,
+            });
+        }
+        return groups;
+    }
+
+    /**
+     * Best-effort "when did this note happen" for ordering the action-items
+     * list: a `start`/`date`/`created` frontmatter stamp, else a leading
+     * `YYYY-MM-DD` in the filename (Granola's convention), else the file mtime.
+     */
+    private resolveNoteDate(
+        file: TFile,
+        fm: Record<string, unknown> | undefined
+    ): Date | null {
+        const fromFm = (k: string): Date | null => {
+            const v = fm?.[k];
+            if (typeof v !== "string" || !v) return null;
+            const d = parseStampDate(v);
+            return Number.isNaN(d.getTime()) ? null : d;
+        };
+        const stamped = fromFm("start") ?? fromFm("date") ?? fromFm("created");
+        if (stamped) return stamped;
+        const m = file.basename.match(/^(\d{4}-\d{2}-\d{2})/);
+        if (m) {
+            const d = parseStampDate(m[1]!);
+            if (!Number.isNaN(d.getTime())) return d;
+        }
+        const mtime = file.stat?.mtime;
+        return typeof mtime === "number" ? new Date(mtime) : null;
+    }
+
+    /**
+     * Marks a scanned task done in its source note. The captured line index is
+     * used when it still holds the task; otherwise the original line text is
+     * located afresh (the note may have changed since the scan). The first
+     * `[ ]` checkbox on that line becomes `[x]`.
+     */
+    private async completeTask(path: string, task: ActionTask): Promise<void> {
+        const file = this.app.vault.getAbstractFileByPath(path);
+        if (!(file instanceof TFile)) return;
+        const lines = (await this.app.vault.read(file)).split("\n");
+        let idx = task.line;
+        if (lines[idx] !== task.raw) {
+            idx = lines.findIndex((l) => l === task.raw);
+        }
+        if (idx < 0) {
+            new Notice(t().dashboard.actions.taskMoved);
+            return;
+        }
+        lines[idx] = lines[idx]!.replace(/\[[^\]]\]/, "[x]");
+        await this.app.vault.modify(file, lines.join("\n"));
     }
 
     /** Opens a file in the active tab (used by dashboard row links/buttons). */
