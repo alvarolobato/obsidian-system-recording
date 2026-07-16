@@ -202,9 +202,20 @@ current (e.g. `actions/checkout@v5`, `actions/setup-node@v5`).
   localStorage write.
 - **Vendored transcriber (`src/transcribe/vendor/`):** keep vendored files as
   pristine as possible for easy upstream updates. Our config/endpoint glue lives
-  in `src/transcribe/TranscriptionService.ts` + `endpointConfig.ts`; the base
+  in `src/transcribe/OpenAICompatibleBackend.ts` + `endpointConfig.ts`; the base
   URL / model overrides are injected via a small seam, not by rewriting vendored
   code. See `src/transcribe/vendor/VENDOR.md`.
+- **Transcription backend seam (`src/transcribe/backend.ts`):** transcription
+  goes through a pluggable `TranscriptionBackend` (`transcribe(request) =>
+  JobResult[]` + `validateConfig()`). `TranscriptionService.ts` is a
+  backend-agnostic *orchestrator* (diarized job construction, capability-miss
+  classification, merge, probe invalidation); the OpenAI-compatible engine —
+  vendored controller, process-global endpoint seam, serial queue, `PLAIN::`
+  key contract, pre-gate encoding, engine-progress band — is fully contained in
+  `OpenAICompatibleBackend`. A local on-device backend (issue #34) drops in
+  against the same interface. The serial queue is module-scoped in
+  `OpenAICompatibleBackend` (the endpoint globals it guards are process-wide),
+  so building a fresh backend per transcription is safe.
 - **i18n:** English is the base. Add UI strings to `src/i18n/en.ts` and use
   `t()`; don't hardcode user-facing strings.
 - **Notification tracing (`src/util/notifLog.ts`):** off by default, gated on the
