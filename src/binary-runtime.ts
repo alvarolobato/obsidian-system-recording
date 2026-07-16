@@ -1,12 +1,15 @@
 import { FileSystemAdapter, requestUrl, type Plugin } from "obsidian";
 import * as fs from "fs";
 import * as fsp from "fs/promises";
+import * as os from "os";
 import * as path from "path";
 import * as crypto from "crypto";
+import { spawn as childSpawn } from "child_process";
 import { Readable, Transform } from "stream";
 import { pipeline } from "stream/promises";
 import type { ReadableStream as NodeWebReadableStream } from "stream/web";
 import { AssetProvisionerDeps, ProvisionerDeps } from "./binary";
+import type { WhisperCppDeps } from "./transcribe/WhisperCppBackend";
 
 export function nodeDeps(): ProvisionerDeps {
 	return {
@@ -53,6 +56,26 @@ export function resolveModelDir(plugin: Plugin): string {
 /** Absolute path to a specific local model file under {@link resolveModelDir}. */
 export function resolveModelPath(plugin: Plugin, fileName: string): string {
 	return path.join(resolveModelDir(plugin), fileName);
+}
+
+/**
+ * Absolute path to the co-located whisper.cpp dylib the recorder helper links
+ * at launch (issue #34). The helper's load command is
+ * `@rpath/whisper.framework/Versions/Current/whisper`, and SwiftPM adds a
+ * `@loader_path` rpath, so a real file at this path — next to the helper —
+ * satisfies dyld with no symlinks needed.
+ */
+export function resolveWhisperDylibPath(plugin: Plugin): string {
+	const adapter = plugin.app.vault.adapter;
+	const basePath = adapter instanceof FileSystemAdapter ? adapter.getBasePath() : "";
+	return path.join(
+		basePath,
+		plugin.manifest.dir ?? "",
+		"whisper.framework",
+		"Versions",
+		"Current",
+		"whisper"
+	);
 }
 
 /**
@@ -123,5 +146,37 @@ export function assetNodeDeps(): AssetProvisionerDeps {
 		},
 		rename: (from, to) => fsp.rename(from, to),
 		unlink: (p) => fsp.unlink(p),
+	};
+}
+
+/**
+ * Real I/O for {@link WhisperCppBackend}: spawns the recorder helper's
+ * `transcribe` subcommand, stages the run manifest in the OS temp dir, and maps
+ * vault {@link import("obsidian").TFile} paths to the absolute filesystem paths
+ * the (out-of-process) helper needs.
+ */
+export function whisperCppNodeDeps(plugin: Plugin): WhisperCppDeps {
+	const adapter = plugin.app.vault.adapter;
+	const basePath = adapter instanceof FileSystemAdapter ? adapter.getBasePath() : "";
+	return {
+		spawn: (binaryPath, args) => childSpawn(binaryPath, [...args]),
+		writeManifest: async (json) => {
+			// Unique per run (pid + time + random) so concurrent/rapid runs can't
+			// clobber each other's manifest — the file is deleted once the run ends.
+			const name = `mc-transcribe-${process.pid}-${Date.now()}-${Math.random()
+				.toString(36)
+				.slice(2)}.json`;
+			const p = path.join(os.tmpdir(), name);
+			await fsp.writeFile(p, json, "utf8");
+			return p;
+		},
+		cleanup: async (p) => {
+			try {
+				await fsp.unlink(p);
+			} catch {
+				// best-effort: a missing temp manifest is fine
+			}
+		},
+		resolveAudioPath: (file) => path.join(basePath, file.path),
 	};
 }

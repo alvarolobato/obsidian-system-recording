@@ -9,6 +9,29 @@ export function releaseUrl(version: string): string {
 	return `https://github.com/${REPO}/releases/download/${version}/system-recorder`;
 }
 
+/**
+ * SHA-256 (hex) and byte size of the `whisper.framework` dylib the recorder
+ * helper links for on-device transcription (issue #34). Unlike the recorder
+ * binary's per-release hash, this is a CONSTANT: the dylib comes from the
+ * whisper.cpp XCFramework pinned in `swift-helper/Package.swift`, so every
+ * release ships the exact same bytes. The universal (x86_64+arm64) slice from
+ * v1.7.5. `release.yml` asserts the shipped dylib matches this before upload —
+ * if the pinned XCFramework version changes, both values must be refreshed.
+ */
+export const EXPECTED_WHISPER_SHA256 =
+	"e6c2b3c065d06ed04ee70f3dbe7479b62ff69d71a20311b07397df8c282aeb03";
+export const WHISPER_DYLIB_SIZE = 4059456;
+
+/**
+ * GitHub release asset URL for the whisper dylib of the given plugin version.
+ * The plugin writes it to `whisper.framework/Versions/Current/whisper` next to
+ * the helper, where the helper's `@rpath/whisper.framework/Versions/Current/whisper`
+ * load command resolves it at launch.
+ */
+export function whisperDylibUrl(version: string): string {
+	return `https://github.com/${REPO}/releases/download/${version}/whisper`;
+}
+
 /** Injected I/O so the provisioner is unit-testable with no real fs/network. */
 export interface ProvisionerDeps {
 	arch: () => string;
@@ -132,6 +155,11 @@ export interface AssetProvisionerDeps {
 export interface EnsureAssetOptions {
 	onDownloadStart?: () => void;
 	onProgress?: (received: number, total: number) => void;
+	/**
+	 * Noun for this asset in error messages ("model", "recorder component", …),
+	 * so a failure is attributed to the right thing. Defaults to "model".
+	 */
+	label?: string;
 	/** Aborts an in-flight download (settings Cancel button / plugin unload). */
 	signal?: AbortSignal;
 }
@@ -185,6 +213,7 @@ export class AssetProvisioner {
 		expectedSize: number,
 		options?: EnsureAssetOptions
 	): Promise<string> {
+		const label = options?.label ?? "model";
 		// Fast path: a present file of the exact expected size is trusted without
 		// re-hashing (models are immutable and hashing 500 MB on every
 		// transcription would tax the quick-roundtrip goal). A wrong size means a
@@ -212,7 +241,7 @@ export class AssetProvisioner {
 			// quiet "cancelled" message instead of a scary download failure.
 			if (e instanceof Error && e.name === "AbortError") throw e;
 			const reason = e instanceof Error ? e.message : String(e);
-			throw new Error(`Failed to download the model: ${reason}`);
+			throw new Error(`Failed to download the ${label}: ${reason}`);
 		}
 
 		try {
@@ -220,10 +249,10 @@ export class AssetProvisioner {
 			// Catch that by size first — it's a clearer error than a hash
 			// mismatch and skips hashing a file already known to be wrong.
 			if ((await this.deps.fileSize(tmp)) !== expectedSize) {
-				throw new Error("Model download was incomplete; please try again.");
+				throw new Error(`The ${label} download was incomplete; please try again.`);
 			}
 			if ((await this.deps.sha256File(tmp)) !== sha256) {
-				throw new Error("Model failed verification.");
+				throw new Error(`The ${label} failed verification.`);
 			}
 			await this.deps.rename(tmp, destPath);
 		} catch (e) {

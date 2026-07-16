@@ -1,5 +1,12 @@
 import { describe, it, expect, vi } from "vitest";
-import { BinaryProvisioner, ProvisionerDeps, releaseUrl } from "./binary";
+import {
+	BinaryProvisioner,
+	EXPECTED_WHISPER_SHA256,
+	ProvisionerDeps,
+	releaseUrl,
+	WHISPER_DYLIB_SIZE,
+	whisperDylibUrl,
+} from "./binary";
 
 const VALID = "validhash";
 const BIN = "/plugin/system-recorder";
@@ -120,5 +127,21 @@ describe("BinaryProvisioner", () => {
 		const p = new BinaryProvisioner(deps, VALID);
 		await Promise.all([p.ensure(BIN, VERSION), p.ensure(BIN, VERSION)]);
 		expect(downloads).toBe(1);
+	});
+});
+
+describe("whisper dylib provisioning contract", () => {
+	// release.yml pins these by regex; a reformat that breaks the shape would
+	// silently ship an unverified dylib, so lock the contract here too.
+	it("pins a 64-char hex SHA-256 and a positive byte size", () => {
+		expect(EXPECTED_WHISPER_SHA256).toMatch(/^[0-9a-f]{64}$/);
+		expect(Number.isInteger(WHISPER_DYLIB_SIZE)).toBe(true);
+		expect(WHISPER_DYLIB_SIZE).toBeGreaterThan(0);
+	});
+
+	it("targets the per-version release asset named 'whisper'", () => {
+		expect(whisperDylibUrl("1.2.3")).toBe(
+			"https://github.com/alvarolobato/obsidian-meeting-copilot/releases/download/1.2.3/whisper"
+		);
 	});
 });

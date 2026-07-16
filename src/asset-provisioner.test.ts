@@ -142,6 +142,20 @@ describe("AssetProvisioner", () => {
 		expect(unlink).toHaveBeenCalledWith(`${DEST}.tmp`);
 	});
 
+	it("attributes failures to a custom label so a non-model asset isn't misnamed", async () => {
+		const deps = makeDeps({
+			fileExists: async () => false,
+			downloadToFile: async () => {
+				throw new Error("HTTP 500");
+			},
+		});
+		await expect(
+			new AssetProvisioner(deps).ensure(DEST, URL, SHA, SIZE, {
+				label: "recorder component",
+			})
+		).rejects.toThrow("Failed to download the recorder component: HTTP 500");
+	});
+
 	it("reports download progress through to the caller", async () => {
 		const seen: Array<[number, number]> = [];
 		const deps = makeDeps({

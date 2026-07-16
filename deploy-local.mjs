@@ -98,23 +98,26 @@ if (deployBinaryFrom) {
 	fs.chmodSync(target, 0o755);
 
 	// The helper links whisper.cpp's *dynamic* framework (issue #34): the binary
-	// references @rpath/whisper.framework/… and resolves it at launch via an
-	// @loader_path rpath, so whisper.framework MUST sit next to the binary or
-	// dyld fails before main() — breaking recording, not just transcription.
-	// SwiftPM co-locates it in the build's release dir; copy it alongside the
-	// binary, preserving the framework's Versions/Current symlinks. (Release
-	// packaging + release-time provisioning of this framework land later in the
-	// stack; this keeps the local --swift dev loop launchable now.)
-	const frameworkSrc = path.join(path.dirname(deployBinaryFrom), "whisper.framework");
-	if (!fs.existsSync(frameworkSrc)) {
-		die(`built whisper.framework not found next to ${deployBinaryFrom}`);
+	// references @rpath/whisper.framework/Versions/Current/whisper and resolves
+	// it at launch via SwiftPM's @loader_path rpath, so the dylib MUST sit next
+	// to the binary or dyld fails before main() — breaking recording, not just
+	// transcription. Reproduce the EXACT layout the release-time AssetProvisioner
+	// writes for shipped users: a plain file at Versions/Current/whisper (a real
+	// directory, no symlinks). Copying the built dylib (not the whole framework,
+	// whose Versions/Current is an absolute symlink into this worktree's .build)
+	// keeps the deployed plugin self-contained and validates the product layout.
+	const builtDylib = path.join(
+		path.dirname(deployBinaryFrom),
+		"whisper.framework/Versions/A/whisper"
+	);
+	if (!fs.existsSync(builtDylib)) {
+		die(`built whisper dylib not found at ${builtDylib}`);
 	}
 	const frameworkDest = path.join(DEST, "whisper.framework");
 	fs.rmSync(frameworkDest, { recursive: true, force: true });
-	// dereference:false (the default, made explicit) is load-bearing: the
-	// framework's Versions/Current -> A symlink must survive the copy or dyld
-	// can't resolve @rpath/whisper.framework/Versions/Current/whisper.
-	fs.cpSync(frameworkSrc, frameworkDest, { recursive: true, dereference: false });
+	const dylibDest = path.join(frameworkDest, "Versions", "Current", "whisper");
+	fs.mkdirSync(path.dirname(dylibDest), { recursive: true });
+	fs.copyFileSync(builtDylib, dylibDest);
 }
 
 console.log(`deploy-local: deployed to ${DEST}`);

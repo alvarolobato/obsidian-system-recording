@@ -15,14 +15,26 @@ import {
     listInputDevices,
     type InputDevice,
 } from "./recorder";
-import { AssetProvisioner, BinaryProvisioner } from "./binary";
+import {
+    AssetProvisioner,
+    BinaryProvisioner,
+    EXPECTED_WHISPER_SHA256,
+    WHISPER_DYLIB_SIZE,
+    whisperDylibUrl,
+} from "./binary";
 import {
     assetNodeDeps,
     nodeDeps,
     resolveBinaryPath,
     resolveModelPath,
+    resolveWhisperDylibPath,
+    whisperCppNodeDeps,
 } from "./binary-runtime";
-import { LOCAL_MODELS, type LocalModelSpec } from "./transcribe/localModels";
+import {
+    LOCAL_MODELS,
+    localModelSpec,
+    type LocalModelSpec,
+} from "./transcribe/localModels";
 import * as path from "path";
 import * as fs from "fs";
 import { GoogleOAuth, type StoredTokens } from "./auth/googleOAuth";
@@ -104,6 +116,7 @@ import {
     type TranscribeConfig,
 } from "./transcribe/TranscriptionService";
 import { OpenAICompatibleBackend } from "./transcribe/OpenAICompatibleBackend";
+import { WhisperCppBackend } from "./transcribe/WhisperCppBackend";
 import type { TranscriptionBackend } from "./transcribe/backend";
 import { canSeparateSpeakers } from "./transcribe/sttModel";
 import { probeKey } from "./transcribe/probe";
@@ -956,14 +969,13 @@ export default class SystemRecordingPlugin extends Plugin {
 
         this.starting = true;
         try {
-            // Ensure the recorder helper binary is present and verified
+            // Ensure the recorder helper runtime is present and verified: the
+            // binary AND the whisper.framework dylib it links at launch (dyld
+            // rejects the binary without it, so this guards recording too — not
+            // just transcription).
             let binaryPath: string;
             try {
-                binaryPath = await this.provisioner.ensure(
-                    resolveBinaryPath(this),
-                    this.manifest.version,
-                    () => new Notice(t().notices.downloadingHelper)
-                );
+                binaryPath = await this.ensureHelperRuntime();
             } catch (e) {
                 new Notice(e instanceof Error ? e.message : String(e));
                 return;
@@ -3187,13 +3199,16 @@ export default class SystemRecordingPlugin extends Plugin {
      * timestamps. Gates both the split at record time and the diarized pass at
      * transcribe time.
      *
-     * Note: the local Whisper engine always emits segment timestamps, so it will
-     * bypass this remote timestamp probe — but that bypass lands together with
-     * the local transcription wiring (the WhisperCppBackend phase of #34). While
-     * transcription is still remote-only, keeping the probe gate here avoids
-     * running doomed diarized passes against the remote endpoint.
+     * The local Whisper engine always emits segment timestamps, so it bypasses
+     * the remote timestamp probe entirely and honors the user's toggle directly
+     * — the probe only describes the remote endpoint's behavior, which is moot
+     * on-device. For the remote backend the probe gate still applies, so a
+     * doomed diarized pass never runs against an endpoint that ignores it.
      */
     private shouldSeparateSpeakers(): boolean {
+        if (this.settings.transcriptionBackend === "local") {
+            return this.settings.diarizationEnabled;
+        }
         return canSeparateSpeakers(
             this.settings,
             probeKey(this.settings.apiBaseUrl, this.settings.sttModel)
@@ -3295,14 +3310,98 @@ export default class SystemRecordingPlugin extends Plugin {
     }
 
     /**
-     * The transcription backend for this run, built from current settings.
-     * Today always the OpenAI-compatible engine; the pluggable seam (issue #34)
-     * is where a local on-device backend will drop in behind a settings toggle.
-     * A fresh instance per call is fine — the serial queue guarding the
-     * process-global endpoint seam is shared at module scope.
+     * The transcription backend for this run, built from current settings —
+     * the OpenAI-compatible engine, or the on-device Whisper backend when the
+     * user selected "local" (issue #34). A fresh instance per call is fine: the
+     * serial queue guarding the remote engine's process-global endpoint seam is
+     * shared at module scope, and the local backend holds no shared state.
+     *
+     * Async because the local path provisions its assets (helper, framework,
+     * model) on first use before it can transcribe.
      */
-    private buildBackend(): TranscriptionBackend {
+    private async buildBackend(): Promise<TranscriptionBackend> {
+        if (this.settings.transcriptionBackend === "local") {
+            return this.buildLocalBackend();
+        }
         return new OpenAICompatibleBackend(this.app, this.buildTranscribeConfig());
+    }
+
+    /**
+     * Ensures the recorder helper is present *and launchable*: the verified
+     * `system-recorder` binary plus the `whisper.framework` dylib it links
+     * unconditionally at process start (issue #34). The shipped helper links
+     * whisper for EVERY subcommand — `start` and `list-devices`, not just
+     * `transcribe` — so without the co-located dylib dyld refuses to launch it
+     * and recording/device enumeration break too, regardless of the chosen
+     * transcription backend. Treating the two as one runtime unit keeps every
+     * spawn path (record, enumerate, transcribe) self-consistent. Returns the
+     * binary path; each ensure is a no-op once the asset is present + verified.
+     */
+    private async ensureHelperRuntime(): Promise<string> {
+        const binaryPath = await this.provisioner.ensure(
+            resolveBinaryPath(this),
+            this.manifest.version,
+            () => new Notice(t().notices.downloadingHelper)
+        );
+        await this.ensureWhisperDylib();
+        return binaryPath;
+    }
+
+    /**
+     * Fetches the whisper.cpp dylib to `whisper.framework/Versions/Current/whisper`
+     * next to the helper (where its `@rpath/.../Versions/Current/whisper` load
+     * command resolves via SwiftPM's `@loader_path` rpath). It's byte-identical
+     * across our releases (pinned XCFramework), so the fixed SHA/size + the
+     * provisioner's size fast-path make this a one-time fetch reused thereafter.
+     */
+    private ensureWhisperDylib(): Promise<string> {
+        return this.modelProvisioner.ensure(
+            resolveWhisperDylibPath(this),
+            whisperDylibUrl(this.manifest.version),
+            EXPECTED_WHISPER_SHA256,
+            WHISPER_DYLIB_SIZE,
+            {
+                label: "recorder component",
+                onDownloadStart: () => new Notice(t().notices.downloadingRuntime),
+            }
+        );
+    }
+
+    /**
+     * The on-device Whisper backend, provisioning everything it needs on first
+     * use: the recorder helper runtime (binary + linked framework) and the
+     * selected ggml model. Each ensure is a no-op once present, so steady-state
+     * adds no download — only the first local transcription (or a model switch)
+     * pays for it, behind its own progress notice.
+     */
+    private async buildLocalBackend(): Promise<TranscriptionBackend> {
+        const binaryPath = await this.ensureHelperRuntime();
+        const spec = localModelSpec(this.settings.localWhisperModel);
+        const modelPath = await this.ensureLocalModel(spec);
+        return new WhisperCppBackend(
+            {
+                binaryPath,
+                modelPath,
+                language: this.settings.sttLanguage || "auto",
+            },
+            whisperCppNodeDeps(this)
+        );
+    }
+
+    /**
+     * Whether a failed local transcription should retry against the remote
+     * service: only when the user enabled the fallback, an endpoint is
+     * configured, and the failure wasn't a user cancellation (which must
+     * propagate as a cancel, not be masked by a fallback pass). The caller also
+     * gates on the intended backend actually being local.
+     */
+    private canFallbackToRemote(error: unknown, signal: AbortSignal): boolean {
+        return (
+            this.settings.localFallbackToRemote &&
+            !isDiarizationCancelled(error, signal) &&
+            !!this.settings.apiBaseUrl &&
+            !!this.settings.apiKey
+        );
     }
 
     /**
@@ -3320,6 +3419,7 @@ export default class SystemRecordingPlugin extends Plugin {
     private async tryDiarizedTranscribe(
         recording: TFile,
         forced: boolean,
+        backend: TranscriptionBackend,
         onProgress?: (percent: number) => void,
         signal?: AbortSignal
     ): Promise<string | null> {
@@ -3358,7 +3458,7 @@ export default class SystemRecordingPlugin extends Plugin {
         const result = await transcribeDiarized(
             meFile,
             themFile,
-            this.buildBackend(),
+            backend,
             windows,
             signal,
             onProgress,
@@ -3428,7 +3528,12 @@ export default class SystemRecordingPlugin extends Plugin {
         // result as silence; a manual re-transcribe replaces. A multi-take
         // manual rebuild has its own path (rebuildTranscriptFromTakes).
         const fresh = opts?.fresh ?? false;
-        if (!this.settings.apiBaseUrl || !this.settings.apiKey) {
+        // The remote backend needs an endpoint; the local one provisions its own
+        // model/helper, so it can transcribe with no endpoint configured.
+        if (
+            this.settings.transcriptionBackend !== "local" &&
+            (!this.settings.apiBaseUrl || !this.settings.apiKey)
+        ) {
             new Notice(t().notices.transcribeNoEndpoint);
             return;
         }
@@ -3537,23 +3642,56 @@ export default class SystemRecordingPlugin extends Plugin {
             const wantDiarized =
                 mode === "diarized" ||
                 (mode === "auto" && this.shouldSeparateSpeakers());
-            const diarizedText = wantDiarized
-                ? await this.tryDiarizedTranscribe(
-                      recording,
-                      mode === "diarized",
-                      onProgress,
-                      signal
-                  )
-                : null;
-            const diarized = diarizedText !== null;
-            const rawText =
-                diarizedText ??
-                (await transcribeAudio(
-                    recording,
-                    this.buildBackend(),
-                    signal,
-                    onProgress
-                ));
+            // Whether the *intended* backend is local, sampled before building it
+            // so a provisioning failure (model/helper download) can fall back too.
+            const useLocal = this.settings.transcriptionBackend === "local";
+            let diarized: boolean;
+            let rawText: string;
+            try {
+                const backend = await this.buildBackend();
+                const diarizedText = wantDiarized
+                    ? await this.tryDiarizedTranscribe(
+                          recording,
+                          mode === "diarized",
+                          backend,
+                          onProgress,
+                          signal
+                      )
+                    : null;
+                diarized = diarizedText !== null;
+                rawText =
+                    diarizedText ??
+                    (await transcribeAudio(recording, backend, signal, onProgress));
+            } catch (e) {
+                // On-device transcription can fail hard (model/helper missing, a
+                // decode error, an OOM). When the user opted into "fall back to
+                // remote" and an endpoint is configured, retry a plain mixed pass
+                // against it — a degraded but working transcript beats none.
+                // Diarization isn't retried remotely: its timestamp support isn't
+                // probed on this path, and a mixed transcript is the safe floor.
+                if (!(useLocal && this.canFallbackToRemote(e, signal))) throw e;
+                console.warn(
+                    "[Meeting Copilot] local transcription failed; falling back to the remote service",
+                    e
+                );
+                // Say diarization was dropped when the user asked for it: the
+                // remote fallback is always a plain mixed pass, so a forced
+                // speaker-separated request silently becomes mixed otherwise.
+                new Notice(
+                    wantDiarized
+                        ? t().notices.localFallbackNoDiarization
+                        : t().notices.localFallback
+                );
+                // Reset the bar so the remote pass ramps 0→100 instead of jumping
+                // backward from wherever the failed local attempt left it.
+                onProgress(0);
+                const remote = new OpenAICompatibleBackend(
+                    this.app,
+                    this.buildTranscribeConfig()
+                );
+                diarized = false;
+                rawText = await transcribeAudio(recording, remote, signal, onProgress);
+            }
             const totalSecs = ((Date.now() - transcribeStart) / 1000).toFixed(1);
             console.warn(
                 `[Meeting Copilot][transcribe] "${recording.name}" transcription finished in ${totalSecs}s (diarized=${diarized}${
@@ -3982,16 +4120,16 @@ export default class SystemRecordingPlugin extends Plugin {
         if (!Platform.isMacOS) return [];
         const binaryPath = resolveBinaryPath(this);
         if (opts?.allowDownload === false) {
-            // Best-effort: only list if the binary is already on disk; never
-            // trigger a download just to populate the dropdown on open.
-            if (!fs.existsSync(binaryPath)) return [];
+            // Best-effort: only list if the helper is already launchable on disk
+            // (binary AND its linked dylib), never trigger a download just to
+            // populate the dropdown on open. Spawning the binary without the
+            // dylib would fail in dyld, so require both.
+            if (!fs.existsSync(binaryPath) || !fs.existsSync(resolveWhisperDylibPath(this))) {
+                return [];
+            }
         } else {
             try {
-                await this.provisioner.ensure(
-                    binaryPath,
-                    this.manifest.version,
-                    () => new Notice(t().notices.downloadingHelper)
-                );
+                await this.ensureHelperRuntime();
             } catch (e) {
                 new Notice(e instanceof Error ? e.message : String(e));
                 return [];
