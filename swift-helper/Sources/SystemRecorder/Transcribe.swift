@@ -24,6 +24,12 @@ import whisper
 private var gTranscribeCancelled: sig_atomic_t = 0
 
 private func installTranscribeSignalHandlers() {
+    // Force the lazy (swift_once) initialization of the file-scope global
+    // *before* a handler is installed: the first access to a Swift global runs
+    // its accessor, which is not async-signal-safe. Touching it here guarantees
+    // a SIGTERM arriving immediately after install only *reads* an already-init
+    // value from the handler.
+    gTranscribeCancelled = 0
     // No-capture closures convert to @convention(c); assigning a global
     // sig_atomic_t is async-signal-safe.
     signal(SIGTERM) { _ in gTranscribeCancelled = 1 }
@@ -34,7 +40,7 @@ private enum TranscribeError: LocalizedError {
     case cannotOpen(String)
     case cannotConvert(String)
     case audioTooLong(samples: Int)
-    case whisperFailed(id: String, code: Int)
+    case whisperFailed(code: Int)
 
     var errorDescription: String? {
         switch self {
@@ -44,8 +50,11 @@ private enum TranscribeError: LocalizedError {
             return "audio decoding failed: \(detail)"
         case .audioTooLong(let samples):
             return "audio is too long for a single pass (\(samples) samples exceeds the whisper limit)"
-        case .whisperFailed(let id, let code):
-            return "whisper_full failed for \"\(id)\" (code \(code))"
+        case .whisperFailed(let code):
+            // No job id here: the runTranscribe job loop already prefixes the
+            // failing job's id ("transcription failed for \"me\": …"), so
+            // repeating it would double it in the emitted error line.
+            return "whisper_full failed (code \(code))"
         }
     }
 }
@@ -250,7 +259,7 @@ private func runJob(
     // An abort (SIGTERM mid-run) surfaces as a non-zero rc; treat a cancellation
     // as a clean stop, not a transcription error.
     if gTranscribeCancelled != 0 { exit(130) }
-    if rc != 0 { throw TranscribeError.whisperFailed(id: id, code: Int(rc)) }
+    if rc != 0 { throw TranscribeError.whisperFailed(code: Int(rc)) }
 
     let segmentCount = whisper_full_n_segments(ctx)
     var fullText = ""
@@ -287,6 +296,7 @@ private func runJob(
 ///     "language": "en",          // or "auto" (default)
 ///     "translate": false,
 ///     "threads": 8,               // optional
+///     "gpu": true,                // optional; false forces CPU
 ///     "jobs": [ { "id": "me", "audio": "/abs/x.me.wav", "segments": true }, … ] }
 ///
 /// The model is loaded once and reused across jobs. Never returns — it exits 0
@@ -323,6 +333,13 @@ func runTranscribe(_ args: [String]) -> Never {
         failTranscribe("transcribe manifest is missing the \"model\" path")
     }
     let language = (obj["language"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? "auto"
+    // Reject an unknown language code up front with a self-explanatory error.
+    // Otherwise whisper logs its rejection through the silenced log callback and
+    // the only symptom the plugin sees is an opaque "whisper_full failed" line.
+    // "auto" is handled natively by whisper_full (language auto-detection).
+    if language != "auto" && whisper_lang_id(language) == -1 {
+        failTranscribe("unknown transcribe language code \"\(language)\"")
+    }
     let translate = obj["translate"] as? Bool ?? false
     let cores = ProcessInfo.processInfo.activeProcessorCount
     let defaultThreads = max(1, min(8, cores))
@@ -340,7 +357,9 @@ func runTranscribe(_ args: [String]) -> Never {
     guard let ctx = whisper_init_from_file_with_params(modelPath, cparams) else {
         failTranscribe("failed to load the Whisper model at \(modelPath)")
     }
-    defer { whisper_free(ctx) }
+    // No `defer { whisper_free(ctx) }`: every exit from here is exit(0/1/130),
+    // and Swift's exit() does not unwind defers, so it would be dead code. The
+    // model + Metal state are reclaimed by the OS at process exit.
 
     for job in jobs {
         guard let id = job["id"] as? String, !id.isEmpty,
