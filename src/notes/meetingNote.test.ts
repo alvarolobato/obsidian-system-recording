@@ -3,18 +3,24 @@ import { TFile, type App, type TFolder } from "obsidian";
 import {
 	__resetRecentNoteCache,
 	ADHOC_ID_PREFIX,
+	appendRecordingLink,
 	createMeetingNote,
 	DEFAULT_NOTE_TEMPLATE,
 	DEFAULT_TITLE_PATTERN,
+	dropRecordingLink,
+	extractTranscriptText,
+	findMeetingNoteForAudio,
 	findNoteByEventId,
 	formatTranscriptCallout,
 	insertTranscript,
 	isAdhocId,
+	linkRecording,
 	type MeetingEventInfo,
 	type MeetingNoteConfig,
 	normalizeFolderPath,
 	parseStampDate,
 	recordingLinkTarget,
+	recordingLinkTargets,
 	resolveMeetingFolder,
 	sanitizeName,
 	scanMeetingNotes,
@@ -133,6 +139,9 @@ function makeApp(vault: FakeVault): App {
 					? undefined
 					: vault.frontmatterFor(file),
 			}),
+			// Minimal resolver: our tests use exact vault paths as link targets.
+			getFirstLinkpathDest: (link: string) =>
+				vault.getAbstractFileByPath(link),
 		},
 		fileManager: {
 			processFrontMatter: async (
@@ -201,6 +210,84 @@ describe("recordingLinkTarget", () => {
 		expect(recordingLinkTarget(undefined)).toBe("");
 		expect(recordingLinkTarget(42)).toBe("");
 		expect(recordingLinkTarget("")).toBe("");
+	});
+	it("returns the latest (last) target for a list", () => {
+		expect(
+			recordingLinkTarget(["[[Meetings/a.wav]]", "[[Meetings/b.wav]]"])
+		).toBe("Meetings/b.wav");
+	});
+});
+
+describe("recordingLinkTargets", () => {
+	it("returns a single-element array for a legacy string", () => {
+		expect(recordingLinkTargets("[[a.wav]]")).toEqual(["a.wav"]);
+	});
+	it("returns every target for a list, in order, skipping empties", () => {
+		expect(
+			recordingLinkTargets(["[[a.wav]]", "", "[[sub/b.wav|alias]]", 5])
+		).toEqual(["a.wav", "sub/b.wav"]);
+	});
+	it("returns [] for absent / non-string", () => {
+		expect(recordingLinkTargets(undefined)).toEqual([]);
+		expect(recordingLinkTargets("")).toEqual([]);
+	});
+});
+
+describe("appendRecordingLink", () => {
+	it("returns a bare string for the first recording", () => {
+		expect(appendRecordingLink(undefined, "[[a.wav]]")).toBe("[[a.wav]]");
+	});
+	it("promotes a single string to a two-item list", () => {
+		expect(appendRecordingLink("[[a.wav]]", "[[b.wav]]")).toEqual([
+			"[[a.wav]]",
+			"[[b.wav]]",
+		]);
+	});
+	it("appends to an existing list (newest last)", () => {
+		expect(
+			appendRecordingLink(["[[a.wav]]", "[[b.wav]]"], "[[c.wav]]")
+		).toEqual(["[[a.wav]]", "[[b.wav]]", "[[c.wav]]"]);
+	});
+	it("is a no-op when the same target is re-linked", () => {
+		expect(appendRecordingLink("[[Rec/a.wav]]", "[[Rec/a.wav]]")).toBe(
+			"[[Rec/a.wav]]"
+		);
+	});
+});
+
+describe("dropRecordingLink", () => {
+	it("removes a matching entry by basename (folder-qualified links)", () => {
+		expect(
+			dropRecordingLink(["[[Rec/a.wav]]", "[[Rec/b.wav]]"], "a.wav")
+		).toBe("[[Rec/b.wav]]");
+	});
+	it("returns undefined when the only recording is dropped", () => {
+		expect(dropRecordingLink("[[a.wav]]", "a.wav")).toBeUndefined();
+	});
+	it("keeps a list when several remain", () => {
+		expect(
+			dropRecordingLink(
+				["[[a.wav]]", "[[b.wav]]", "[[c.wav]]"],
+				"b.wav"
+			)
+		).toEqual(["[[a.wav]]", "[[c.wav]]"]);
+	});
+	it("leaves the value untouched when nothing matches", () => {
+		expect(dropRecordingLink("[[a.wav]]", "z.wav")).toBe("[[a.wav]]");
+	});
+	it("prefers an exact path match over same-basename siblings", () => {
+		expect(
+			dropRecordingLink(
+				["[[Rec/a.wav]]", "[[Other/a.wav]]"],
+				"Rec/a.wav"
+			)
+		).toBe("[[Other/a.wav]]");
+	});
+	it("falls back to basename when no link matches the full path exactly", () => {
+		// Bare links + a full-path target: no exact match, so basename wins.
+		expect(dropRecordingLink(["[[a.wav]]", "[[b.wav]]"], "Rec/a.wav")).toBe(
+			"[[b.wav]]"
+		);
 	});
 });
 
@@ -289,10 +376,95 @@ describe("transcriptAtBottom", () => {
 	});
 });
 
+describe("transcriptAtBottom (append)", () => {
+	it("concatenates a second transcript below the first, one callout", () => {
+		const first = transcriptAtBottom("# T\n\n## Notes\n\nn\n", "first take");
+		const both = transcriptAtBottom(first, "second take", true);
+		expect(both).toContain("> first take");
+		expect(both).toContain("> second take");
+		// A single callout still, with a rule between the two takes.
+		expect(both.match(/\[!quote\]- Transcript/g)?.length).toBe(1);
+		expect(both).toContain("> ---");
+		expect(
+			both.indexOf("first take")
+		).toBeLessThan(both.indexOf("second take"));
+	});
+
+	it("creates the callout when appending with no prior transcript", () => {
+		const out = transcriptAtBottom("# T\n\n## Notes\n\nn\n", "only take", true);
+		expect(out).toContain("> [!quote]- Transcript");
+		expect(out).toContain("> only take");
+		expect(out).not.toContain("---");
+	});
+
+	it("both takes are readable back for enrichment after an append", () => {
+		// Guards the fresh-append path: enrichment must see the FULL combined
+		// transcript (extractTranscript reads the callout the note was left with),
+		// not just the latest take, so a 2nd take's summary includes the 1st.
+		const first = transcriptAtBottom("# T\n\n## Notes\n\nn\n", "first take");
+		const both = transcriptAtBottom(first, "second take", true);
+		const readBack = extractTranscript(both);
+		expect(readBack).toContain("first take");
+		expect(readBack).toContain("second take");
+		expect(readBack.indexOf("first take")).toBeLessThan(
+			readBack.indexOf("second take")
+		);
+	});
+});
+
+describe("extractTranscriptText", () => {
+	it("round-trips text through a formatted callout", () => {
+		const note = transcriptAtBottom("# T\n", "line one\n\nline two");
+		expect(extractTranscriptText(note)).toBe("line one\n\nline two");
+	});
+	it("reads a legacy '## Transcript' heading section", () => {
+		const legacy = "# T\n\n## Transcript\n\nold body\n\n## Action items\n\n- a\n";
+		expect(extractTranscriptText(legacy)).toBe("old body");
+	});
+	it("returns '' when there is no transcript", () => {
+		expect(extractTranscriptText("# T\n\n## Notes\n\nfoo")).toBe("");
+	});
+});
+
 describe("stripTranscript", () => {
 	it("returns content unchanged when there is no transcript", () => {
 		const input = "# T\n\n## Notes\n\nfoo";
 		expect(stripTranscript(input)).toBe(input);
+	});
+});
+
+describe("findMeetingNoteForAudio", () => {
+	it("matches a note linking the audio as a non-latest list entry", () => {
+		const vault = new FakeVault();
+		vault.addNote("Meetings/m.md", {
+			recording: ["[[Meetings/Rec/a.wav]]", "[[Meetings/Rec/b.wav]]"],
+		});
+		const audioA = vault.addNote("Meetings/Rec/a.wav", {});
+		expect(findMeetingNoteForAudio(makeApp(vault), audioA)?.path).toBe(
+			"Meetings/m.md"
+		);
+	});
+	it("returns null when no note links the audio", () => {
+		const vault = new FakeVault();
+		vault.addNote("Meetings/m.md", { recording: "[[Meetings/Rec/a.wav]]" });
+		const orphan = vault.addNote("Meetings/Rec/z.wav", {});
+		expect(findMeetingNoteForAudio(makeApp(vault), orphan)).toBeNull();
+	});
+});
+
+describe("linkRecording", () => {
+	it("stores a bare string for the first recording, then a list", async () => {
+		const vault = new FakeVault();
+		const file = vault.addNote("Meetings/m.md", { status: "scheduled" });
+		const app = makeApp(vault);
+		await linkRecording(app, file, "Rec/a.wav");
+		expect(vault.frontmatterFor(file)?.recording).toBe("[[Rec/a.wav]]");
+		expect(vault.frontmatterFor(file)?.status).toBe("recorded");
+		await linkRecording(app, file, "Rec/b.wav");
+		expect(vault.frontmatterFor(file)?.recording).toEqual([
+			"[[Rec/a.wav]]",
+			"[[Rec/b.wav]]",
+		]);
 	});
 });
 
@@ -311,6 +483,23 @@ describe("insertTranscript", () => {
 		const body = await vault.read(file);
 		expect(body).toContain("Transcript");
 		expect(body).toContain("Ann: hi");
+	});
+
+	it("appends a second take below the first when append is set", async () => {
+		const vault = new FakeVault();
+		const file = vault.addNote(
+			"Meetings/m.md",
+			{ status: "recorded" },
+			"# M\n\n## Notes\n\nmy note\n"
+		);
+		const app = makeApp(vault);
+		await insertTranscript(app, file, "take one", { append: true });
+		await insertTranscript(app, file, "take two", { append: true });
+		const body = await vault.read(file);
+		expect(body).toContain("> take one");
+		expect(body).toContain("> take two");
+		expect(body.match(/\[!quote\]- Transcript/g)?.length).toBe(1);
+		expect(body.indexOf("take one")).toBeLessThan(body.indexOf("take two"));
 	});
 });
 

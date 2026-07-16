@@ -229,12 +229,13 @@
 table.mc-attention {
     width: 100%;
     border-collapse: collapse;
+    font-size: calc(var(--font-ui-smaller) - 1px);
 }
 
 table.mc-attention th,
 table.mc-attention td {
     text-align: left;
-    padding: var(--size-2-2) var(--size-4-2);
+    padding: var(--size-2-1) var(--size-2-3);
     border-bottom: 1px solid var(--background-modifier-border);
     vertical-align: middle;
 }
@@ -265,11 +266,6 @@ table.mc-attention td {
     color: var(--text-on-accent);
 }
 
-.mc-badge-recording {
-    background: rgba(var(--color-red-rgb), 0.2);
-    color: var(--text-normal);
-}
-
 .mc-badge-transcript {
     background: rgba(var(--color-yellow-rgb), 0.2);
     color: var(--text-normal);
@@ -278,6 +274,317 @@ table.mc-attention td {
 .mc-badge-summary {
     background: rgba(var(--color-blue-rgb), 0.2);
     color: var(--text-normal);
+}
+
+/* =========================================================================
+ * Dashboard note layout: maximize screen usage. The Create-dashboard command
+ * stamps the note with the `meeting-copilot-dashboard` cssclass; here that
+ * turns off readable-line-length (so the tables use the full window) and trims
+ * the side padding, in both reading and live-preview/source modes.
+ * ====================================================================== */
+.meeting-copilot-dashboard .markdown-preview-sizer,
+.meeting-copilot-dashboard .cm-sizer,
+.meeting-copilot-dashboard .cm-content,
+.meeting-copilot-dashboard .cm-line {
+    max-width: none !important;
+    width: auto !important;
+}
+
+.meeting-copilot-dashboard.markdown-preview-view,
+.meeting-copilot-dashboard .markdown-preview-view {
+    padding-left: var(--size-4-1);
+    padding-right: var(--size-4-1);
+}
+
+/* Hide the note's plumbing so the dashboard reads clean: the frontmatter
+ * Properties widget (cssclasses is only there to trigger the styling above)
+ * and the `%% meeting-copilot:dashboard %%` block markers. Reading view already
+ * hides the comment markers; this also hides them in Live Preview (except the
+ * line you're actively editing, so they stay reachable). */
+.meeting-copilot-dashboard .metadata-container {
+    display: none;
+}
+
+.meeting-copilot-dashboard .cm-line:has(> .cm-comment):not(.cm-active) {
+    display: none;
+}
+
+/* =========================================================================
+ * Dashboard sections rendered by the plugin (meetings tables + action items):
+ * calendar-enriched, dense, and paginated via a shared bottom toolbar.
+ * ====================================================================== */
+.mc-meetings-empty,
+.mc-meetings-loading,
+.mc-actions-empty,
+.mc-actions-loading {
+    color: var(--text-muted);
+}
+
+.mc-meetings-error {
+    color: var(--text-error);
+}
+
+table.mc-meetings {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: calc(var(--font-ui-smaller) - 1px);
+    line-height: 1.35;
+}
+
+table.mc-meetings td {
+    padding: 1px var(--size-2-2);
+    border: none;
+    vertical-align: middle;
+}
+
+/* Dense, muted column headers to match the action-items list. */
+table.mc-attention th {
+    font-weight: var(--font-normal);
+    color: var(--text-muted);
+}
+
+/* Date group subheader: one row per day, so the rows below drop the date. */
+.mc-meetings-day {
+    padding-top: var(--size-4-1) !important;
+    padding-bottom: 1px !important;
+    color: var(--text-muted);
+    font-weight: var(--font-semibold);
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.mc-meetings-dayrow:first-child .mc-meetings-day {
+    padding-top: 0 !important;
+}
+
+/* Time + title share one column; the time is a fixed-width, muted prefix. */
+.mc-meetings-when {
+    width: 100%;
+    white-space: nowrap;
+}
+
+.mc-meetings-time {
+    display: inline-block;
+    min-width: 3.4em;
+    color: var(--text-muted);
+    font-variant-numeric: tabular-nums;
+}
+
+/* No-note rows: muted, non-link title (the create-note icon signals it). */
+.mc-meeting-nonote {
+    color: var(--text-muted);
+}
+
+/* Trailing cell merges status + the create-note icon. Center each item as a
+ * shrink-to-fit block with auto side margins so a lone status dot lines up
+ * exactly under the create-note icon of other rows, despite their different
+ * widths (text-align alone left them a couple of px off). */
+.mc-meetings-trail {
+    white-space: nowrap;
+    width: 1.8em;
+}
+
+.mc-meetings-trail .mc-status-dot {
+    display: block;
+    margin: 0 auto;
+}
+
+.mc-meetings-trail .mc-icon-btn {
+    display: flex;
+    width: fit-content;
+    margin: 0 auto;
+    padding: 0;
+}
+
+.mc-meetings-trail .mc-icon-btn .svg-icon {
+    width: 14px;
+    height: 14px;
+}
+
+/* Status shown as a small colour-coded dot with the status as its tooltip. */
+.mc-status-dot {
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    margin-right: var(--size-2-2);
+    background: var(--text-faint);
+    vertical-align: middle;
+}
+
+.mc-status-scheduled {
+    background: var(--text-faint);
+}
+
+.mc-status-recorded {
+    background: var(--interactive-accent);
+}
+
+.mc-status-transcribed {
+    background: rgba(var(--color-yellow-rgb), 0.9);
+}
+
+.mc-status-enriched {
+    background: rgba(var(--color-green-rgb), 0.9);
+}
+
+/* Open action items: dense, grouped by note (small muted title + date). */
+.mc-actions-list {
+    display: flex;
+    flex-direction: column;
+    gap: var(--size-4-2);
+}
+
+.mc-action-note-header {
+    display: flex;
+    align-items: baseline;
+    gap: var(--size-2-3);
+}
+
+.mc-action-note-title {
+    font-size: calc(var(--font-ui-smaller) - 1px);
+    font-weight: var(--font-normal);
+}
+
+.mc-action-note-date {
+    color: var(--text-muted);
+    font-size: calc(var(--font-ui-smaller) - 1px);
+}
+
+ul.mc-action-tasks {
+    margin: var(--size-2-1) 0 0 0;
+    padding-left: var(--size-4-3);
+    list-style: none;
+}
+
+.mc-action-task {
+    display: flex;
+    align-items: baseline;
+    gap: var(--size-2-2);
+    font-size: calc(var(--font-ui-smaller) - 1px);
+    line-height: 1.35;
+    padding: 1px 0;
+}
+
+.mc-action-task-check {
+    margin: 0;
+    flex-shrink: 0;
+}
+
+/* Recently-completed tasks kept for their grace period: muted + struck. */
+.mc-action-task-done .mc-action-task-text {
+    color: var(--text-muted);
+    text-decoration: line-through;
+}
+
+/* Keep rendered task markdown inline and margin-free for density, and let
+ * the task text read at a normal weight (owners come through as bold from the
+ * enricher; the user wants the list uniformly un-bold). */
+.mc-action-task-text > * {
+    margin: 0;
+    display: inline;
+}
+
+.mc-action-task-text strong,
+.mc-action-task-text b {
+    font-weight: var(--font-normal);
+}
+
+/* Shared bottom toolbar: count on the left, controls + pagination on the right. */
+.mc-dash-toolbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: var(--size-2-3);
+    margin-top: var(--size-4-2);
+    padding-top: var(--size-2-2);
+    border-top: 1px solid var(--background-modifier-border);
+}
+
+.mc-dash-toolbar-left {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: var(--size-2-3) var(--size-4-2);
+}
+
+.mc-dash-count {
+    color: var(--text-muted);
+    font-size: var(--font-ui-smaller);
+}
+
+/* Status colour key, shown in the meetings toolbar next to the count. */
+.mc-dash-legend {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: var(--size-2-3) var(--size-4-1);
+}
+
+.mc-dash-legend-item {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--size-2-1);
+    color: var(--text-muted);
+    font-size: calc(var(--font-ui-smaller) - 1px);
+}
+
+.mc-dash-legend-item .mc-status-dot {
+    margin: 0;
+}
+
+.mc-dash-toolbar-right {
+    display: flex;
+    align-items: center;
+    gap: var(--size-4-2);
+}
+
+.mc-dash-perpage {
+    display: flex;
+    align-items: center;
+    gap: var(--size-2-2);
+    color: var(--text-muted);
+    font-size: var(--font-ui-smaller);
+}
+
+.mc-pagination {
+    display: flex;
+    align-items: center;
+    gap: var(--size-2-3);
+}
+
+.mc-pagination-status {
+    color: var(--text-muted);
+    font-size: var(--font-ui-smaller);
+    min-width: 3.5em;
+    text-align: center;
+}
+
+.mc-icon-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: var(--size-2-1);
+    background: transparent;
+    box-shadow: none;
+    cursor: pointer;
+    color: var(--text-muted);
+}
+
+.mc-icon-btn:hover:not(:disabled) {
+    color: var(--text-normal);
+}
+
+.mc-icon-btn:disabled {
+    opacity: 0.4;
+    cursor: default;
+}
+
+.mc-icon-btn .svg-icon {
+    width: var(--icon-s);
+    height: var(--icon-s);
 }
 
 /* =========================================================================

@@ -28,9 +28,10 @@ export interface MeetingPromptModalOptions {
  * Join & record, and (when provided) Open note, plus a plain dismiss. Each
  * action closes the modal.
  *
- * The two-step notification → modal flow is deliberate: renderer Web
- * Notifications can't render action buttons, so the notification carries the
- * timing and a click brings the user here where the real choices live.
+ * This modal is the notification's body-click target: the native OS
+ * notification carries the actions as buttons, but clicking its *body* (or the
+ * button-less web-fallback banner) brings the user here, where the full,
+ * richly-laid-out set of choices lives.
  */
 export class MeetingPromptModal extends Modal {
 	constructor(

@@ -102,8 +102,11 @@ export function renderMeetingRow(opts: MeetingRowOptions): void {
 			() => handlers.onStop(),
 			"meeting-copilot-row-action-danger"
 		);
-	} else if (!meeting.recording && !meeting.allDay && (isLive || isUpcoming)) {
-		iconButton(trail, "mic", a.actions.record, () =>
+	} else if (!meeting.allDay && (isLive || isUpcoming || meeting.recording)) {
+		// Offer record even when a recording already exists (a second take
+		// extends the same meeting), relabeled so it's clearly additive.
+		const label = meeting.recording ? a.actions.recordAgain : a.actions.record;
+		iconButton(trail, "mic", label, () =>
 			handlers.onCreateAndRecord(meeting)
 		);
 	}
@@ -172,10 +175,17 @@ export function populateMeetingMenu(
 		}
 	}
 
-	if (!handlers.isRecordingThis(meeting) && !meeting.recording) {
+	// Record is offered even when a recording already exists: a new take is
+	// appended to the same meeting (and a silent first take auto-discards), so
+	// the user is never stuck having to delete a recording to record again.
+	if (!handlers.isRecordingThis(meeting)) {
 		menu.addItem((item) =>
 			item
-				.setTitle(t().event.createNoteAndRecord)
+				.setTitle(
+					meeting.recording
+						? t().event.recordAgain
+						: t().event.createNoteAndRecord
+				)
 				.setIcon("mic")
 				.onClick(() => handlers.onCreateAndRecord(meeting))
 		);

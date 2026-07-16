@@ -4,6 +4,7 @@ import {
 	recordingLinkTarget,
 	scanMeetingNotes,
 	type MeetingEventInfo,
+	type MeetingNoteScanEntry,
 } from "../../notes/meetingNote";
 
 /**
@@ -45,11 +46,16 @@ interface NoteIndexEntry {
 /**
  * Indexes meeting notes by their `event_id` frontmatter (via the shared
  * `scanMeetingNotes` pass) so agenda rows can show note/recording state
- * cheaply, without a second full-vault scan of its own.
+ * cheaply, without a second full-vault scan of its own. Pass `entries` to
+ * reuse a scan the caller already ran (a render that also builds its own
+ * inputs from the same pass) instead of walking the vault again.
  */
-export function buildNoteIndex(app: App): Map<string, NoteIndexEntry> {
+export function buildNoteIndex(
+	app: App,
+	entries: MeetingNoteScanEntry[] = scanMeetingNotes(app)
+): Map<string, NoteIndexEntry> {
 	const map = new Map<string, NoteIndexEntry>();
-	for (const entry of scanMeetingNotes(app)) {
+	for (const entry of entries) {
 		if (!entry.eventId) continue;
 
 		let recording: TFile | null = null;

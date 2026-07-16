@@ -1,47 +1,37 @@
 import { describe, expect, it } from "vitest";
 import {
+	ACTIONS_BLOCK_LANG,
 	buildDashboardBlock,
 	DASHBOARD_END,
 	DASHBOARD_START,
+	PAST_BLOCK_LANG,
+	UPCOMING_BLOCK_LANG,
 	withDashboardBlock,
 } from "./dashboard";
 
 describe("buildDashboardBlock", () => {
-	it("is vault-wide (no FROM), gated to meeting notes by event_id/meeting_url", () => {
+	it("has the section headings and starts/ends with the managed markers", () => {
 		const block = buildDashboardBlock();
-		expect(block).not.toContain("FROM ");
-		expect(block).toContain(
-			"WHERE (event_id OR meeting_url) AND date(start) AND date(start) >= date(now)"
-		);
-		expect(block).toContain(
-			"WHERE (event_id OR meeting_url) AND date(start) AND date(start) < date(now)"
-		);
-		// The current instant must be the `date(now)` literal. A bare `now` is
-		// read as the (missing) field `now` = null, and `date(start) >= null` is
-		// true for every row — which put all past meetings under "Upcoming".
-		expect(block).not.toMatch(/>= now\b/);
-		expect(block).not.toMatch(/< now\b/);
-		// The instant literal, not the midnight `date(today)` — otherwise a
-		// same-day meeting that already ended would still count as upcoming.
-		expect(block).not.toContain("date(today)");
-		// `start` is coerced with `date()` so a plain-string frontmatter value
-		// isn't compared against a date by cross-type ordering.
-		expect(block).not.toContain("AND start >= ");
-		expect(block).not.toContain("AND start < ");
-		// The same coercion must apply to the sort and the rendered Date column,
-		// otherwise a string `start` sorts/formats inconsistently against a date.
-		expect(block).toContain(
-			'dateformat(date(start), "yyyy-MM-dd HH:mm") AS Date'
-		);
-		expect(block).toContain("SORT date(start) ASC");
-		expect(block).toContain("SORT date(start) DESC");
-		expect(block).not.toContain("SORT start ASC");
-		expect(block).not.toContain("SORT start DESC");
-		expect(block).toContain(
-			"TASK WHERE !completed AND (file.frontmatter.event_id OR file.frontmatter.meeting_url)"
-		);
+		expect(block).toContain("## Upcoming meetings");
+		expect(block).toContain("## Past meetings");
+		expect(block).toContain("## Open action items");
+		expect(block).toContain("## Needs attention");
 		expect(block.startsWith(DASHBOARD_START)).toBe(true);
 		expect(block.endsWith(DASHBOARD_END)).toBe(true);
+	});
+
+	it("renders every section via plugin blocks, not Dataview", () => {
+		const block = buildDashboardBlock();
+		expect(block).toContain("```" + UPCOMING_BLOCK_LANG);
+		expect(block).toContain("```" + PAST_BLOCK_LANG);
+		expect(block).toContain("```" + ACTIONS_BLOCK_LANG);
+		// No Dataview left: no FROM/TASK query, no date-split predicates/sorts.
+		expect(block).not.toContain("```dataview");
+		expect(block).not.toContain("TASK WHERE");
+		expect(block).not.toContain("date(start) >= date(now)");
+		expect(block).not.toContain("date(start) < date(now)");
+		expect(block).not.toContain("SORT date(start) ASC");
+		expect(block).not.toContain("SORT date(start) DESC");
 	});
 });
 

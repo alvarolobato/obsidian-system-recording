@@ -3,6 +3,8 @@ export const en = {
 	ribbon: {
 		toggleRecording: "Start/Stop on-demand meeting",
 		openAgenda: "Open meeting agenda",
+		recordForMeeting: (title: string) => `Record for “${title}”`,
+		newAdhoc: "New ad-hoc meeting",
 	},
 	commands: {
 		startRecording: "Start unplanned meeting",
@@ -37,6 +39,10 @@ export const en = {
 	notices: {
 		autoRecordEnabled: "Calendar auto-recording enabled",
 		autoRecordDisabled: "Calendar auto-recording disabled",
+		// One-time tip shown the first time a meeting notification fires.
+		notificationStyleHint:
+			"Tip: if meeting prompts land only in Notification Center, it's a macOS setting — turn off Do Not Disturb / Focus and set Obsidian to “Alerts” so they pop up on screen (with a button).",
+		openNotificationSettings: "Open settings",
 		recordingError: (msg: string) => `Recording error: ${msg}`,
 		screenPermission:
 			"Recording failed: Screen Recording isn't authorized. Opening System Settings → Privacy & Security → Screen Recording — enable Obsidian there, then fully quit and reopen it. (macOS requires this for capturing system audio.)",
@@ -58,6 +64,7 @@ export const en = {
 		calendarReconnect: "Google Calendar disconnected — reconnect",
 		calendarReconnectAction: "Reconnect",
 		recordingSaved: "Recording saved",
+		silentDiscarded: "No speech detected — recording discarded",
 		autoTranscribeNotIndexed:
 			"Recording saved, but auto-transcription could not start (the file never appeared in the vault index). Transcribe it from the agenda.",
 		unknownError: "Unknown error",
@@ -83,6 +90,8 @@ export const en = {
 		transcribeEmpty: "Transcription produced no text.",
 		transcribePartial:
 			"Transcription only partially succeeded — not inserted. Try again.",
+		retranscribeIncomplete:
+			"Couldn't re-transcribe every take — kept the existing transcript. Try again.",
 		transcribeInProgress: "This recording is already being transcribed…",
 		transcribeQueued: (name: string) => `Queued "${name}" for transcription`,
 		transcribeCancelled: "Transcription cancelled",
@@ -135,6 +144,7 @@ export const en = {
 		ended: (title: string) => `"${title}" has ended`,
 		startRecordingAction: "Start recording",
 		createNoteAndRecord: "Create note and start recording",
+		recordAgain: "Record again (new take)",
 		stopRecordingAction: "Stop recording",
 		// Meeting-start prompt (native notification → in-app prompt / modal).
 		startsInMin: (min: number) =>
@@ -142,7 +152,12 @@ export const en = {
 		startingNow: "Starting now",
 		startedMinAgo: (min: number) =>
 			`Started ${min} min${min === 1 ? "" : "s"} ago`,
-		notificationHint: "click for options",
+		// Web-notification fallback only (a web banner can't render buttons, so
+		// it points the user into Obsidian). The native path omits this.
+		notificationWebHint: "Open Obsidian to choose",
+		// Body of the "meeting ended" system/in-app prompt (the action button
+		// carries the verb; this is the question).
+		stopRecordingPrompt: "Stop recording?",
 		join: "Join",
 		record: "Record",
 		joinAndRecord: "Join & record",
@@ -181,6 +196,7 @@ export const en = {
 		nextMonth: "Next month",
 		actions: {
 			record: "Create note and record",
+			recordAgain: "Record again (new take)",
 			stop: "Stop recording",
 			openNote: "Open note",
 			createNote: "Create note",
@@ -212,10 +228,43 @@ export const en = {
 			colActions: "Actions",
 			missing: {
 				date: "date",
-				recording: "recording",
 				transcript: "transcript",
 				summary: "summary",
 			},
+		},
+		controls: {
+			perPage: "Per page",
+			prev: "Previous",
+			next: "Next",
+			refresh: "Refresh",
+			pageOf: (current: number, total: number) =>
+				`${current} / ${total}`,
+		},
+		meetings: {
+			upcomingCount: (n: number) =>
+				`${n} upcoming meeting${n === 1 ? "" : "s"}`,
+			pastCount: (n: number) =>
+				`${n} past meeting${n === 1 ? "" : "s"}`,
+			upcomingEmpty: "No upcoming meetings.",
+			pastEmpty: "No past meetings yet.",
+			loading: "Loading calendar…",
+			calendarError: "Couldn't load calendar meetings; showing notes only.",
+			createNote: "Create note",
+			// Status labels double as the dot tooltips and the toolbar legend.
+			status: {
+				scheduled: "Scheduled",
+				recorded: "Recorded",
+				transcribed: "Transcribed",
+				enriched: "Enriched",
+			},
+		},
+		actions: {
+			count: (n: number) =>
+				`${n} open action item${n === 1 ? "" : "s"}`,
+			empty: "No open action items.",
+			loading: "Scanning notes…",
+			taskMoved: "That task has changed in its note; refreshing.",
+			taskError: (msg: string) => `Couldn't complete the task: ${msg}`,
 		},
 	},
 	settings: {
@@ -269,6 +318,10 @@ export const en = {
 		autoTranscribe: {
 			name: "Auto-transcribe when recording stops",
 			desc: "When a meeting recording finishes, transcribe it automatically (no dialog) and add the transcript to the meeting note. Requires the shared AI endpoint (base URL + API key) above.",
+		},
+		discardSilentRecordings: {
+			name: "Discard silent recordings",
+			desc: "When a just-stopped recording has no speech (e.g. you started before anyone joined), move it to the trash and remove it from the note so you can record again right away. Uses the auto-transcribe result, so it needs auto-transcribe enabled.",
 		},
 		retentionDays: {
 			name: "Recording retention (days)",
@@ -334,6 +387,12 @@ export const en = {
 		agendaLookBack: {
 			name: "Agenda look-back (days)",
 			desc: "How many past days you can navigate back to in the agenda (0–30).",
+		},
+		notificationsHeading: "Notifications (macOS)",
+		notificationStyle: {
+			name: "Notifications not popping up?",
+			desc: "When Obsidian is in front you get an in-app prompt; otherwise a system notification. If those system notifications land silently in Notification Center instead of on screen, it's a macOS setting (apps can't override it): turn off Do Not Disturb / Focus, set Obsidian to “Alerts” so prompts persist with a button, and — while recording or mirroring a display — enable “Allow notifications when mirroring or sharing the display”.",
+			button: "Open macOS notification settings",
 		},
 		detectionHeading: "Meeting detection (macOS)",
 		detectMeetings: {

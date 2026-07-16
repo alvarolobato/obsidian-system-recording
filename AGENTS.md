@@ -68,17 +68,37 @@ git branch -d fix/my-thing   # after the PR merges
 
 ## Pull request & review process
 
-1. Branch off the latest `origin/main` in a fresh worktree.
-2. Implement, keeping changes focused. Add/adjust `vitest` tests for logic changes.
-3. Ensure lint + tests + build are green.
-4. Open a PR with a Summary + Test plan (use a HEREDOC for the body).
-5. **Review cycles** (this is the norm for non-trivial PRs):
-   - **Copilot** review (`gh` auto-review) — a first pass.
-   - An **independent Opus review** — a second, deeper pass.
-   - Address every finding; push fixes as new commits (don't force-push unless asked).
-6. Re-run reviews until clean, then merge (squash) once CI is green.
+This is the standard end-to-end flow for a non-trivial change (the notification
+unification in #82 / PR followed it):
 
-Only merge when the user asks. Never create commits or push unless requested.
+1. **File an issue with the detailed plan first.** Do a comprehensive analysis
+   (root causes, code map, acceptance criteria) and open a GitHub issue with the
+   full plan before writing code. It anchors the PR and gives reviewers the
+   "why". Use a HEREDOC / `--body-file` for the body.
+2. Branch off the latest `origin/main` in a **dedicated worktree** (one per
+   PR — see above).
+3. Implement, keeping changes focused. Prefer pure, injectable helpers so logic
+   is unit-testable without Electron/Obsidian; add/adjust `vitest` tests for
+   every logic change.
+4. Ensure lint + tests + build are green (`npm run lint && npm test && npm run build`).
+5. Open a PR with a Summary + Test plan (use a HEREDOC for the body) and link
+   the issue (`Closes #<n>`).
+6. **Review cycles** (the norm for non-trivial PRs):
+   - **Copilot** review — request it on the PR (`gh pr edit <n> --add-reviewer @copilot`,
+     or the API) for a first pass.
+   - An **independent Opus review with clean context** — run it as a fresh
+     agent/subagent that only sees the PR diff, so it isn't biased by the
+     implementation chat. A second, deeper pass.
+   - Address **every** finding; push fixes as new commits (don't force-push
+     unless asked).
+   - **Reply to each review comment** explaining the fix (or why it's a
+     non-issue) and **resolve the thread** once handled
+     (`gh api ... /pulls/<n>/comments` to read; resolve via the GraphQL
+     `resolveReviewThread` mutation or the UI).
+7. Re-run reviews until clean, then get it merge-ready (green CI, no open
+   threads). Merge (squash) **only when the user asks**.
+
+Never create commits or push unless requested.
 
 ### Reading PR feedback with `gh`
 
@@ -198,6 +218,13 @@ current (e.g. `actions/checkout@v5`, `actions/setup-node@v5`).
   so building a fresh backend per transcription is safe.
 - **i18n:** English is the base. Add UI strings to `src/i18n/en.ts` and use
   `t()`; don't hardcode user-facing strings.
+- **Notification tracing (`src/util/notifLog.ts`):** off by default, gated on the
+  `mc:notif-debug` localStorage flag (read at plugin load). When set it prints
+  `[mc:notif] …` traces (via `console.warn`, so console-export tools capture
+  them) and registers a dev-only "Debug test meeting notification" command in
+  `main.ts`. Nothing ships to end users while the flag is off; changing it needs
+  a plugin reload. User-facing steps live under *Debugging notifications* in the
+  README.
 - **Retention safety:** audio is pruned only when the owning note has the
   managed `transcript_saved` frontmatter flag (set by `insertTranscript`), never
   by sniffing the note body — a template placeholder must not cause data loss.

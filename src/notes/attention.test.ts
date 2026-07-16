@@ -1,71 +1,60 @@
 import { describe, expect, it } from "vitest";
 import { computeAttention, type AttentionInput } from "./attention";
 
-const NOW = new Date("2026-07-11T12:00:00");
-
 function input(over: Partial<AttentionInput>): AttentionInput {
 	return {
 		path: "Meetings/x.md",
 		title: "x",
 		start: new Date("2026-07-10T10:00:00"),
-		status: "scheduled",
-		hasRecording: false,
+		status: "recorded",
+		hasRecording: true,
+		processing: false,
 		...over,
 	};
 }
 
 describe("computeAttention", () => {
-	it("flags a past meeting with no recording as missing everything", () => {
-		const rows = computeAttention([input({})], NOW);
-		expect(rows).toHaveLength(1);
-		expect(rows[0]?.missing).toEqual(["recording", "summary"]);
+	it("skips meetings with no recording (nothing the user can do)", () => {
+		// A scheduled meeting, or a past one that was never recorded, has no
+		// source to transcribe or summarize, so it never needs attention.
+		expect(
+			computeAttention([
+				input({ status: "scheduled", hasRecording: false }),
+				input({
+					start: new Date("2026-01-01T10:00:00"),
+					status: "scheduled",
+					hasRecording: false,
+				}),
+			])
+		).toHaveLength(0);
 	});
 
-	it("flags a recorded-but-not-transcribed meeting", () => {
-		const rows = computeAttention(
-			[input({ status: "recorded", hasRecording: true })],
-			NOW
-		);
-		expect(rows[0]?.missing).toEqual(["transcript", "summary"]);
+	it("flags a recorded-but-not-transcribed meeting (transcript only)", () => {
+		const rows = computeAttention([input({ status: "recorded" })]);
+		expect(rows[0]?.missing).toEqual(["transcript"]);
 	});
 
-	it("flags a transcribed-but-not-enriched meeting as missing only the summary", () => {
-		const rows = computeAttention(
-			[input({ status: "transcribed", hasRecording: true })],
-			NOW
-		);
+	it("flags a transcribed-but-not-enriched meeting (summary only)", () => {
+		const rows = computeAttention([input({ status: "transcribed" })]);
 		expect(rows[0]?.missing).toEqual(["summary"]);
 	});
 
 	it("does not surface a fully enriched meeting", () => {
-		const rows = computeAttention(
-			[input({ status: "enriched", hasRecording: true })],
-			NOW
-		);
+		const rows = computeAttention([input({ status: "enriched" })]);
 		expect(rows).toHaveLength(0);
 	});
 
-	it("skips clean future meetings but keeps future ones already recorded", () => {
-		const future = new Date("2026-07-20T10:00:00");
+	it("skips a meeting that is currently being processed (transcribing/queued/enriching)", () => {
 		expect(
-			computeAttention([input({ start: future })], NOW)
+			computeAttention([input({ status: "recorded", processing: true })])
 		).toHaveLength(0);
-		expect(
-			computeAttention(
-				[input({ start: future, status: "recorded", hasRecording: true })],
-				NOW
-			)
-		).toHaveLength(1);
 	});
 
 	it("flags invalid dates and sorts them first", () => {
-		const rows = computeAttention(
-			[
-				input({ path: "a", start: new Date("2026-07-01T10:00:00") }),
-				input({ path: "b", start: null }),
-			],
-			NOW
-		);
+		const rows = computeAttention([
+			input({ path: "a", start: new Date("2026-07-01T10:00:00") }),
+			input({ path: "b", start: null }),
+		]);
 		expect(rows[0]?.path).toBe("b");
 		expect(rows[0]?.missing).toContain("date");
 	});
