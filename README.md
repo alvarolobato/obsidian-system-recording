@@ -41,7 +41,7 @@ Meeting Copilot handles calendar, recording, transcription, and enrichment on it
 
 **Option B — manual:**
 
-1. From the [latest release](https://github.com/alvarolobato/obsidian-meeting-copilot/releases/latest), download `main.js`, `manifest.json`, `styles.css` (and optionally the `system-recorder` helper — if you grab it, also grab the `whisper` runtime asset, since the helper won't launch without it).
+1. From the [latest release](https://github.com/alvarolobato/obsidian-meeting-copilot/releases/latest), download `main.js`, `manifest.json`, `styles.css` (and optionally the `system-recorder` helper — if you grab it, also grab the `whisper` runtime asset, since the helper won't launch without it; see step 2 for exactly where the `whisper` asset goes).
 2. Copy `main.js`, `manifest.json`, and `styles.css` into `.obsidian/plugins/meeting-copilot/` in your vault. If you also downloaded the helper, put `system-recorder` in that same folder and place the `whisper` asset at `whisper.framework/Versions/Current/whisper` **inside** it (create those directories) — the plugin only loads the dylib from that exact path, so a `whisper` file dropped next to `main.js` is ignored and it will just re-download the asset on first use. Easiest is to skip the manual helper copy and let step 5 fetch both.
 3. In Obsidian, enable **Meeting Copilot** under *Settings → Community plugins*.
 
@@ -122,7 +122,7 @@ Switching the transcription engine or the local model is locked while a model is
 - **Ad-hoc meetings folder**: where unplanned (ad-hoc or detected) meeting notes land.
 - **Recording retention (days)**: recordings older than this are trashed on startup and via *Clean up old recordings*; `0` keeps them forever. A recording is pruned only when the plugin has durably saved the transcript into its owning meeting note — so notes without the transcript captured (e.g. enriched with *Insert transcript* off), orphan/ad-hoc recordings, and unrelated audio are never deleted.
 - **AI endpoint (shared)**: OpenAI-compatible base URL + API key used for AI enrichment and for remote transcription (not needed for the local engine).
-- **Transcription**: **Transcription engine** (*Remote (API endpoint)* or *Local (on-device Whisper)*), a transcription model (remote) or **Local model** (local), language, and **speaker separation**. Remote-only: AI post-processing and custom dictionary. Local-only: **fall back to remote**. Plus **Auto-transcribe when recording stops** (headless — no dialog).
+- **Transcription**: **Transcription engine** (*Remote (API endpoint)* or *Local (on-device Whisper)*), a transcription model (remote) or **Local model** (local), language, and **Separate my voice from others**. Remote-only: AI post-processing and custom dictionary. Local-only: **Fall back to remote on failure**. Plus **Auto-transcribe when recording stops** (headless — no dialog).
 - **AI enrichment**: enable it, pick a chat model (via **Test connection** + dropdown); optionally enrich automatically after transcription.
 - **Action items as tasks**: lift enriched action items into `## Action items` checkboxes (preserving existing/completed tasks).
 

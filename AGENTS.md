@@ -19,7 +19,7 @@ recorder helper uses ScreenCaptureKit / Core Audio).
   - `src/detect/` — meeting detection (Zoom/Meet probes).
   - `src/ui/` — agenda sidebar view and modals.
   - `src/i18n/` — localization; **English is the base language** (`en.ts`). UI strings go through `t()`.
-- `swift-helper/` — the `SystemRecorder` Swift package (dual-channel audio capture + the `transcribe` subcommand in `Transcribe.swift`, which drives whisper.cpp over Metal and streams NDJSON). Built into the `system-recorder` binary; links whisper.cpp's **dynamic** `whisper.framework`, so the `whisper` dylib ships next to the binary.
+- `swift-helper/` — the `SystemRecorder` Swift package (dual-channel audio capture + the `transcribe` subcommand in `Transcribe.swift`, which drives whisper.cpp over Metal and streams NDJSON). Built into the `system-recorder` binary; links whisper.cpp's **dynamic** `whisper.framework`, so the `whisper` dylib ships in the `whisper.framework/Versions/Current/whisper` layout next to the binary.
 - `.github/workflows/` — `ci.yml` (PRs + pushes to main) and `release.yml` (version tags).
 - `manifest.json`, `versions.json`, `styles.css`, `esbuild.config.mjs`.
 
