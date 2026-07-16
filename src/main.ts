@@ -137,8 +137,19 @@ import {
     RowHandlers,
 } from "./ui/agenda/components/meetingRow";
 import { registerIcons, RECORD_ICON } from "./ui/icons";
-import { notifyOs, requestNotificationPermission } from "./ui/osNotification";
+import {
+	notifyOs,
+	requestNotificationPermission,
+	OsNotificationAction,
+} from "./ui/osNotification";
+import {
+	startDualChannelPrompt,
+	DualChannelController,
+	InAppHandle,
+} from "./ui/dualChannelPrompt";
 import { MeetingPromptModal } from "./ui/meetingPromptModal";
+import { notifLog, notifDebugEnabled } from "./util/notifLog";
+import { decideWindowFocused, BrowserWindowState } from "./util/windowFocus";
 import {
     QueueSnapshot,
     TranscriptionCancelledError,
@@ -241,19 +252,21 @@ export default class SystemRecordingPlugin extends Plugin {
 	/** Calendar event ids whose meeting link was already auto-opened, so it opens once. */
 	private openedLinkEventIds = new Set<string>();
 	/**
-	 * In-app meeting prompts currently on screen, keyed by meeting (calendar
-	 * event id, or a detection key). A new prompt for the *same* key supersedes
-	 * its predecessor (upcoming → start), while distinct meetings coexist so
-	 * overlapping / post-wake catch-up prompts don't clobber each other.
+	 * Meeting prompts currently on screen, keyed by meeting (calendar event id,
+	 * or a detection key). Each is a dual-channel controller (an always-shown
+	 * in-app notice, plus a native OS notification when Obsidian isn't frontmost).
+	 * A new prompt for the *same* key supersedes its predecessor (upcoming →
+	 * start), while distinct meetings coexist so overlapping / post-wake catch-up
+	 * prompts don't clobber each other.
 	 */
-	private meetingNotices = new Map<string, Notice>();
+	private meetingNotices = new Map<string, DualChannelController>();
 	/**
 	 * The current "meeting ended — stop recording?" prompt, if any. A recording
 	 * never stops on its own (unless the user opted into calendar auto-stop), so
 	 * the end of a meeting only offers to stop; we keep one reference to supersede
 	 * a stale prompt and to clear it once recording actually ends.
 	 */
-	private stopPromptNotice: Notice | null = null;
+	private stopPromptNotice: DualChannelController | null = null;
 	/** Resolvers waiting for the current recording to fully stop (back-to-back chaining). */
 	private stopWaiters: Array<() => void> = [];
 	/** True while a stopped recording is still being linked/handled in attachRecording. */
@@ -451,6 +464,41 @@ export default class SystemRecordingPlugin extends Plugin {
 			callback: () => this.cancelActiveTranscription(),
 		});
 
+		// Dev-only (gated on the `mc:notif-debug` localStorage flag, off in
+		// shipped builds): fire a sample meeting prompt after a delay so you can
+		// click away first to test the system-notification (not-focused) path.
+		// Watch the DevTools console (Cmd+Opt+I) filtered by `mc:notif`.
+		if (notifDebugEnabled()) {
+			this.addCommand({
+				id: "debug-test-notification",
+				name: "Debug test meeting notification",
+				callback: () => {
+					notifLog(
+						"debug-test-notification: scheduled (4s) — click away now to test the system notification"
+					);
+					new Notice(
+						"Test notification in 4s — click away to test the system notification",
+						4000
+					);
+					window.setTimeout(() => {
+						notifLog("debug-test-notification: firing", {
+							focused: this.isWindowFocused(),
+						});
+						this.promptMeeting({
+							key: "debug:test",
+							title: "Test meeting",
+							subtitle: "Debug notification",
+							meetLink: "https://example.com/meet",
+							onRecord: () =>
+								notifLog("debug-test-notification: onRecord picked"),
+							onOpenNote: () =>
+								notifLog("debug-test-notification: onOpenNote picked"),
+						});
+					}, 4000);
+				},
+			});
+		}
+
 		// Once the vault index is ready, nudge the user about recordings that
 		// finished but were never transcribed (e.g. a reload mid-transcription).
 		this.app.workspace.onLayoutReady(() =>
@@ -483,8 +531,39 @@ export default class SystemRecordingPlugin extends Plugin {
 
 		this.updateScheduler();
 		requestNotificationPermission();
+		this.logNotificationEnvironment();
 		this.updateDetector();
     }
+
+	/** One-shot startup dump so "no notifications" reports have concrete context. */
+	private logNotificationEnvironment(): void {
+		// Skip the probing entirely when tracing is off — `notifLog` would drop it
+		// anyway, so there's no reason to compute focus state or poke the (flaky)
+		// Electron seam on every startup.
+		if (!notifDebugEnabled()) return;
+		let remoteAvailable = false;
+		try {
+			const req = (window as unknown as { require?: (id: string) => unknown })
+				.require;
+			if (typeof req === "function") {
+				const electron = req("electron") as
+					| { remote?: { Notification?: unknown } }
+					| undefined;
+				remoteAvailable = !!electron?.remote?.Notification;
+			}
+		} catch {
+			remoteAvailable = false;
+		}
+		notifLog("environment", {
+			isMacOS: Platform.isMacOS,
+			focused: this.isWindowFocused(),
+			webPermission:
+				typeof window !== "undefined" && window.Notification
+					? window.Notification.permission
+					: "n/a",
+			electronRemoteNotification: remoteAvailable,
+		});
+	}
 
     onunload() {
         if (this.recorder.isRecording) {
@@ -508,9 +587,10 @@ export default class SystemRecordingPlugin extends Plugin {
 		this.agendaEvents.clear();
 		for (const renderer of this.liveActionRenderers) renderer.unload();
 		this.liveActionRenderers.clear();
-		for (const notice of this.meetingNotices.values()) notice.hide();
+		for (const controller of this.meetingNotices.values())
+			controller.dispose();
 		this.meetingNotices.clear();
-		this.stopPromptNotice?.hide();
+		this.stopPromptNotice?.dispose();
 		this.stopPromptNotice = null;
     }
 
@@ -993,7 +1073,9 @@ export default class SystemRecordingPlugin extends Plugin {
 		if (this.authExpired) return;
 		this.authExpired = true;
 		this.scheduler?.stop();
-		this.dismissMeetingNotices(SystemRecordingPlugin.CAL_NOTICE_PREFIX);
+		this.dismissMeetingNotices(SystemRecordingPlugin.CAL_NOTICE_PREFIX, {
+			keepOs: true,
+		});
 		this.agendaEvents.emit("changed", undefined);
 		actionNotice(
 			t().notices.calendarReconnect,
@@ -1037,10 +1119,13 @@ export default class SystemRecordingPlugin extends Plugin {
 			if (!this.scheduler.isRunning) this.scheduler.start();
 		} else {
 			this.scheduler?.stop();
-			// No more boundary callbacks will fire, so sweep any calendar prompts
-			// still on screen rather than leaving them stale (detection prompts,
-			// driven separately, are left alone).
-			this.dismissMeetingNotices(SystemRecordingPlugin.CAL_NOTICE_PREFIX);
+			// No more boundary callbacks will fire, so sweep any calendar prompts'
+			// in-app notices rather than leaving them stale (detection prompts,
+			// driven separately, are left alone). Keep the OS notifications in
+			// Notification Center so a missed prompt stays recoverable there.
+			this.dismissMeetingNotices(SystemRecordingPlugin.CAL_NOTICE_PREFIX, {
+				keepOs: true,
+			});
 		}
 	}
 
@@ -1068,9 +1153,10 @@ export default class SystemRecordingPlugin extends Plugin {
 			!Platform.isMacOS
 		) {
 			this.detector = null;
-			// No probe will fire onEnd now, so sweep any detection prompts still
-			// on screen (mirrors the calendar sweep when the scheduler stops).
-			this.dismissMeetingNotices("detect:");
+			// No probe will fire onEnd now, so sweep any detection prompts'
+			// in-app notices (mirrors the calendar sweep when the scheduler stops),
+			// keeping their OS notifications in Notification Center.
+			this.dismissMeetingNotices("detect:", { keepOs: true });
 			return;
 		}
 		if (!this.detector) {
@@ -1152,48 +1238,219 @@ export default class SystemRecordingPlugin extends Plugin {
 	 */
 	private onMeetingEnded(app: string): void {
 		// The detected meeting is over, so a pending "record?" prompt for it is
-		// moot — drop it whether or not we go on to offer a stop below.
-		this.dismissMeetingNotice(`detect:${app}`);
+		// moot — drop its in-app notice whether or not we go on to offer a stop
+		// below, but keep the OS notification recoverable in Notification Center.
+		this.dismissMeetingNotice(`detect:${app}`, { keepOs: true });
 		// Ignore if detection was disabled meanwhile (an in-flight poll's onEnd
 		// must not prompt after the user opted out), and only act once *all*
 		// detected meetings have ended so one of several concurrent calls ending
 		// doesn't prompt while another is still live.
 		if (!this.detector || this.detector.activeCount() > 0) return;
 		if (!this.recorder.isRecording) return;
-		this.promptStopRecording(t().detect.ended(app));
+		this.promptStopRecording(t().detect.ended(app), t().event.stopRecordingPrompt);
 	}
 
 	/**
-	 * Offers to stop the current recording (a recording never stops on its own).
-	 * Supersedes any prior stop prompt so end-of-meeting triggers that overlap
-	 * (detected-meeting end + calendar event end) don't stack two notices.
+	 * Posts a meeting prompt across two channels so it's never silently lost:
+	 *
+	 *  - The in-app notice is **always** shown — it's reliable and it waits in
+	 *    Obsidian, so the prompt is there when the user comes back.
+	 *  - A native OS notification is added **only when Obsidian isn't frontmost**
+	 *    (an in-app notice can't be seen there); when frontmost it would just
+	 *    duplicate the in-app notice, so it's skipped.
+	 *
+	 * The returned controller's `dispose()` closes the OS notification by default
+	 * (supersede / user action); housekeeping sweeps pass `{ keepOs: true }` to
+	 * leave it in Notification Center so a missed prompt stays recoverable.
 	 */
-	private promptStopRecording(message: string): void {
-		this.stopPromptNotice?.hide();
-		this.stopPromptNotice = actionNotice(
-			message,
-			t().event.stopRecordingAction,
-			() => {
-				this.stopPromptNotice = null;
-				this.stopRecording();
+	private startOsPrompt(opts: {
+		title: string;
+		body: string;
+		webHint: string;
+		/** Native/web body click (Obsidian is already brought to the front). */
+		onClick: () => void;
+		/** Native action buttons (first = default). */
+		actions: OsNotificationAction[];
+		/** Builds the (always-shown) in-app notice. */
+		showInApp: () => InAppHandle;
+	}): DualChannelController {
+		const focused = this.isWindowFocused();
+		notifLog("startOsPrompt", {
+			title: opts.title,
+			focused,
+			actions: opts.actions.length,
+		});
+		return startDualChannelPrompt({
+			focused,
+			showInApp: () => {
+				notifLog("startOsPrompt: showInApp -> creating in-app notice", {
+					title: opts.title,
+				});
+				return opts.showInApp();
+			},
+			showOs: () => {
+				notifLog("startOsPrompt: unfocused -> posting OS notification", {
+					title: opts.title,
+				});
+				return notifyOs({
+					title: opts.title,
+					body: opts.body,
+					webHint: opts.webHint,
+					onClick: opts.onClick,
+					actions: opts.actions,
+					onShown: () => {
+						notifLog("startOsPrompt: onShown (OS delivered)", {
+							title: opts.title,
+						});
+						// A system notification reached the screen — a good moment
+						// to teach (once) how to make them show/persist reliably.
+						this.maybeShowNotificationStyleHint();
+					},
+					onFailed: () =>
+						notifLog("startOsPrompt: onFailed (OS could not show)", {
+							title: opts.title,
+						}),
+				});
+			},
+		});
+	}
+
+	/**
+	 * True when Obsidian's window is actually frontmost and visible — so an
+	 * in-app notice would be seen. Prefers Electron's `BrowserWindow` state
+	 * (reliable), falling back to the document's focus/visibility when `remote`
+	 * isn't reachable. Logs the raw signals so a focus-detection regression is
+	 * visible in traces.
+	 */
+	private isWindowFocused(): boolean {
+		const doc = typeof document !== "undefined" ? document : null;
+		const hasFocus = !!doc && doc.hasFocus();
+		const visibilityState = doc ? doc.visibilityState : "n/a";
+		let win: BrowserWindowState | null = null;
+		try {
+			const req = (window as unknown as { require?: (id: string) => unknown })
+				.require;
+			const electron =
+				typeof req === "function"
+					? (req("electron") as
+							| {
+									remote?: {
+										getCurrentWindow?: () => {
+											isFocused: () => boolean;
+											isMinimized: () => boolean;
+											isVisible: () => boolean;
+										};
+									};
+							  }
+							| undefined)
+					: undefined;
+			const current = electron?.remote?.getCurrentWindow?.();
+			if (current) {
+				win = {
+					isFocused: current.isFocused(),
+					isMinimized: current.isMinimized(),
+					isVisible: current.isVisible(),
+				};
+			}
+		} catch (err) {
+			notifLog("isWindowFocused: remote threw", { err: String(err) });
+		}
+		const result = decideWindowFocused({ win, visibilityState, hasFocus });
+		notifLog("isWindowFocused", {
+			hasFocus,
+			visibilityState,
+			isFocused: win?.isFocused ?? null,
+			isMinimized: win?.isMinimized ?? null,
+			isVisible: win?.isVisible ?? null,
+			result,
+		});
+		return result;
+	}
+
+	/**
+	 * Opens macOS System Settings at the Notifications pane. macOS won't let an
+	 * app change these for you, so this is the one-click path to the two settings
+	 * meeting prompts need: the global "Allow notifications when mirroring or
+	 * sharing the display" toggle (so they appear *while recording* instead of
+	 * landing silently in Notification Center) and Obsidian's row set to "Alerts"
+	 * (so they persist on screen with a button). Both live on this pane.
+	 */
+	openMacNotificationSettings(): void {
+		if (!Platform.isMacOS) return;
+		execFile(
+			"open",
+			["x-apple.systempreferences:com.apple.Notifications-Settings.extension"],
+			(err) => {
+				if (err)
+					console.warn("Failed to open Notification settings", err);
 			}
 		);
 	}
 
 	/**
-	 * Prompts the user to act on an upcoming/starting meeting. Two channels fire
-	 * together, regardless of window focus (a focused-but-elsewhere user — other
-	 * Space/monitor, Obsidian behind other windows — would otherwise miss it):
+	 * One-time onboarding tip: the first time a meeting notification is shown,
+	 * point the user at the macOS "Alerts" style so notifications stay on screen
+	 * (with their buttons) instead of auto-dismissing. Never nags again.
+	 */
+	private maybeShowNotificationStyleHint(): void {
+		if (!Platform.isMacOS || this.settings.notificationStyleHintShown) return;
+		this.settings.notificationStyleHintShown = true;
+		void this.saveSettings();
+		multiActionNotice(t().notices.notificationStyleHint, [
+			{
+				label: t().notices.openNotificationSettings,
+				onClick: () => this.openMacNotificationSettings(),
+				cta: true,
+			},
+			{ label: t().event.dismiss, onClick: () => undefined },
+		]);
+	}
+
+	/**
+	 * Offers to stop the current recording (a recording never stops on its own)
+	 * on both channels: an always-shown in-app notice, plus — when Obsidian isn't
+	 * frontmost — a native OS notification with a "Stop recording" action.
+	 * Supersedes any prior stop prompt so end-of-meeting triggers that overlap
+	 * (detected-meeting end + calendar event end) don't stack two prompts.
+	 */
+	private promptStopRecording(title: string, body: string): void {
+		notifLog("promptStopRecording", { title, body });
+		this.stopPromptNotice?.dispose();
+		const stop = (): void => {
+			// Tear down our own prompt first (hides the in-app notice and closes
+			// the OS notification) so nothing stale survives the stop.
+			this.stopPromptNotice?.dispose();
+			this.stopPromptNotice = null;
+			this.stopRecording();
+		};
+		this.stopPromptNotice = this.startOsPrompt({
+			title,
+			body,
+			webHint: t().event.notificationWebHint,
+			// The body click can't be the destructive stop; `notifyOs` already
+			// brings Obsidian forward, surfacing the always-shown in-app prompt.
+			onClick: () => {},
+			actions: [{ text: t().event.stopRecordingAction, run: stop }],
+			showInApp: () =>
+				actionNotice(`${title} — ${body}`, t().event.stopRecordingAction, stop),
+		});
+	}
+
+	/**
+	 * Prompts the user to act on an upcoming/starting meeting across two channels
+	 * so it's seen regardless of window focus (a focused-but-elsewhere user —
+	 * other Space/monitor, Obsidian behind other windows — would otherwise miss
+	 * it):
 	 *
-	 *  - a **native OS notification** (title = meeting name, body = timing +
-	 *    hint) whose click focuses Obsidian and opens the rich prompt modal, and
-	 *  - an in-app **multi-action Notice** with the same buttons for when
-	 *    Obsidian is already in front.
+	 *  - an in-app **multi-action Notice** — always shown, so the prompt is
+	 *    waiting in Obsidian even if the user is away when it fires, and
+	 *  - a **native OS notification** (title = meeting name, body = timing) added
+	 *    only when Obsidian isn't frontmost — its action buttons render as real
+	 *    macOS buttons (default first, rest under the dropdown) and its body click
+	 *    opens the rich prompt modal.
 	 *
-	 * Web Notifications can't render action buttons, so the notification is the
-	 * attention-getter and the modal/notice carry the actual choices. `onRecord`
-	 * is the record action; a valid https `meetLink` adds the Join affordances,
-	 * and an `onOpenNote` adds an "Open note" action (Granola-style).
+	 * `onRecord` is the record action; a valid https `meetLink` adds the Join
+	 * affordances, and an `onOpenNote` adds an "Open note" action (Granola-style).
 	 */
 	private promptMeeting(opts: {
 		/** Stable per-meeting key: a same-key reprompt supersedes, distinct keys coexist. */
@@ -1207,6 +1464,11 @@ export default class SystemRecordingPlugin extends Plugin {
 		/** Called whenever the user opens the link (Join / Join & record), so the auto-open at start can be suppressed. */
 		onLinkOpened?: () => void;
 	}): void {
+		notifLog("promptMeeting", {
+			key: opts.key,
+			title: opts.title,
+			hasLink: !!opts.meetLink,
+		});
 		const link =
 			opts.meetLink && opts.meetLink.startsWith("https://")
 				? opts.meetLink
@@ -1242,11 +1504,12 @@ export default class SystemRecordingPlugin extends Plugin {
 				}
 			: null;
 
-		// In-app multi-action notice (guaranteed path when Obsidian is in front).
-		// Order mirrors the modal / Granola: a combined primary (Join & record)
-		// when there's a link — else Record — then Join, then Open note. The
-		// combined action is the record path when a link exists, so no separate
-		// Record button is needed there.
+		// Action order mirrors the modal / Granola: a combined primary (Join &
+		// record) when there's a link — else Record — then Join, then Open note.
+		// Only the first becomes the OS notification's button (see below); the
+		// full set stays in the in-app notice and the modal. The combined action
+		// is the record path when a link exists, so no separate Record button is
+		// needed there.
 		const e = t().event;
 		const actions: NoticeAction[] = [];
 		if (onJoinAndRecord) {
@@ -1257,46 +1520,58 @@ export default class SystemRecordingPlugin extends Plugin {
 		}
 		if (onOpenNote)
 			actions.push({ label: e.openNote, onClick: onOpenNote });
+
+		// Opens the rich prompt modal (the OS notification's body-click target).
+		const openModal = (): void => {
+			new MeetingPromptModal(this.app, {
+				title: opts.title,
+				subtitle: opts.subtitle,
+				hasLink: link !== null,
+				joinLabel: e.join,
+				recordLabel: e.record,
+				joinAndRecordLabel: e.joinAndRecord,
+				openNoteLabel: e.openNote,
+				dismissLabel: e.dismiss,
+				onJoin: onJoin ?? ((): void => undefined),
+				onRecord,
+				onJoinAndRecord: onJoinAndRecord ?? onRecord,
+				onOpenNote,
+			}).open();
+		};
+
 		// Supersede an earlier prompt for the *same* meeting (e.g. the lead-time
 		// notice when the start boundary now fires) rather than stacking a second
-		// persistent notice — but leave other meetings' prompts alone so
-		// overlapping meetings each keep theirs.
-		this.meetingNotices.get(opts.key)?.hide();
+		// prompt — but leave other meetings' prompts alone so overlapping
+		// meetings each keep theirs.
+		this.meetingNotices.get(opts.key)?.dispose();
 		this.meetingNotices.set(
 			opts.key,
-			multiActionNotice(
-				`${opts.title} — ${opts.subtitle}`,
-				actions,
-				// Once the user picks an action the notice is gone — drop our
-				// bookkeeping entry so the map only ever holds live prompts.
-				() => this.meetingNotices.delete(opts.key)
-			)
-		);
-
-		// Native OS notification (visible while minimized / on another Space).
-		// When the platform supports it the same actions render as real macOS
-		// buttons (first inline, rest under the notification's dropdown); its
-		// body click — and the no-actions fallback banner — opens the rich modal.
-		notifyOs(
-			opts.title,
-			`${opts.subtitle} · ${e.notificationHint}`,
-			() => {
-				new MeetingPromptModal(this.app, {
-					title: opts.title,
-					subtitle: opts.subtitle,
-					hasLink: link !== null,
-					joinLabel: e.join,
-					recordLabel: e.record,
-					joinAndRecordLabel: e.joinAndRecord,
-					openNoteLabel: e.openNote,
-					dismissLabel: e.dismiss,
-					onJoin: onJoin ?? ((): void => undefined),
-					onRecord,
-					onJoinAndRecord: onJoinAndRecord ?? onRecord,
-					onOpenNote,
-				}).open();
-			},
-			actions.map((a) => ({ text: a.label, run: a.onClick }))
+			this.startOsPrompt({
+				title: opts.title,
+				body: opts.subtitle,
+				webHint: e.notificationWebHint,
+				onClick: openModal,
+				// macOS/Electron renders a *single* action as a named inline
+				// button but collapses two-or-more into a generic "Options ▾"
+				// dropdown. Users want the named default button, so the OS
+				// notification carries only the primary action; the rest stay one
+				// tap away via the body click (modal) and the in-app notice.
+				actions: actions
+					.slice(0, 1)
+					.map((a) => ({ text: a.label, run: a.onClick })),
+				// The in-app multi-action notice is always shown (it carries the
+				// full set of actions and waits in Obsidian); the OS notification
+				// above is the additive channel when Obsidian isn't frontmost.
+				showInApp: () =>
+					multiActionNotice(
+						`${opts.title} — ${opts.subtitle}`,
+						actions,
+						// Once the user picks an action the notice is gone — drop
+						// our bookkeeping entry so the map only ever holds live
+						// prompts.
+						() => this.meetingNotices.delete(opts.key)
+					),
+			})
 		);
 	}
 
@@ -1308,17 +1583,31 @@ export default class SystemRecordingPlugin extends Plugin {
 	 * decision has been made for the meeting (auto-start fired, we're already
 	 * recording it, or it just ended) so a now-stale prompt doesn't linger or
 	 * stack under a new one.
+	 *
+	 * Housekeeping callers (a meeting that just ended, not a user action) pass
+	 * `{ keepOs: true }` so the OS notification stays in Notification Center and a
+	 * missed prompt remains recoverable there.
 	 */
-	private dismissMeetingNotice(key: string): void {
-		this.meetingNotices.get(key)?.hide();
+	private dismissMeetingNotice(
+		key: string,
+		opts?: { keepOs?: boolean }
+	): void {
+		this.meetingNotices.get(key)?.dispose(opts);
 		this.meetingNotices.delete(key);
 	}
 
-	/** Dismisses every live prompt whose key starts with `prefix`. */
-	private dismissMeetingNotices(prefix: string): void {
-		for (const [key, notice] of this.meetingNotices) {
+	/**
+	 * Dismisses every live prompt whose key starts with `prefix`. Housekeeping
+	 * sweeps (scheduler/detector turned off, auth expired) pass `{ keepOs: true }`
+	 * so the OS notifications survive in Notification Center.
+	 */
+	private dismissMeetingNotices(
+		prefix: string,
+		opts?: { keepOs?: boolean }
+	): void {
+		for (const [key, controller] of this.meetingNotices) {
 			if (!key.startsWith(prefix)) continue;
-			notice.hide();
+			controller.dispose(opts);
 			this.meetingNotices.delete(key);
 		}
 	}
@@ -1621,10 +1910,14 @@ export default class SystemRecordingPlugin extends Plugin {
 
 	private handleEventEnd(event: ScheduledEvent): void {
 		// The meeting is over: forget its auto-open state so a later recurrence
-		// (same id, re-added by a poll) can open its link afresh, and drop any
-		// lingering upcoming/start prompt for it (whether or not we recorded).
+		// (same id, re-added by a poll) can open its link afresh, and drop the
+		// lingering upcoming/start prompt's in-app notice (whether or not we
+		// recorded), keeping its OS notification recoverable in Notification
+		// Center.
 		this.openedLinkEventIds.delete(event.id);
-		this.dismissMeetingNotice(SystemRecordingPlugin.CAL_NOTICE_PREFIX + event.id);
+		this.dismissMeetingNotice(SystemRecordingPlugin.CAL_NOTICE_PREFIX + event.id, {
+			keepOs: true,
+		});
 
 		// Only act when *this* meeting's recording is the active one, so
 		// overlapping meetings can't stop the wrong recording (or prompt when
@@ -1644,7 +1937,10 @@ export default class SystemRecordingPlugin extends Plugin {
 			this.stopRecording();
 			return;
 		}
-		this.promptStopRecording(t().event.ended(event.summary));
+		this.promptStopRecording(
+			t().event.ended(event.summary),
+			t().event.stopRecordingPrompt
+		);
 	}
 
     // MARK: - Meeting agenda
@@ -3788,7 +4084,10 @@ export default class SystemRecordingPlugin extends Plugin {
                     this.stopRecording();
                     return;
                 }
-                this.promptStopRecording(t().event.ended(title));
+                this.promptStopRecording(
+                    t().event.ended(title),
+                    t().event.stopRecordingPrompt
+                );
                 return;
             }
             this.lastDurationTickAt = now;
@@ -3841,7 +4140,7 @@ export default class SystemRecordingPlugin extends Plugin {
         this.currentRecordingEventEnd = null;
         // Recording has ended, so any "meeting ended — stop recording?" prompt is
         // moot; drop it.
-        this.stopPromptNotice?.hide();
+        this.stopPromptNotice?.dispose();
         this.stopPromptNotice = null;
         this.agendaEvents.emit("changed", undefined);
         // A stop that ends without going through attachRecording (no file, or an

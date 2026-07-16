@@ -80,8 +80,50 @@ In *Settings → Meeting Copilot → AI enrichment*, enable enrichment, then cli
 
 - Click the microphone icon in the left ribbon to start/stop an ad-hoc recording.
 - Open the **meeting agenda** sidebar to create a note + record, transcribe, enrich, or join a meeting for any calendar event.
-- When a calendar meeting starts, a notice offers **"Create note and start recording"**.
+- When a calendar meeting starts (or ends while recording), you get a meeting prompt. It **always** appears as an **in-app notice**, so it's waiting for you in Obsidian even if you were away when it fired. When Obsidian is **minimized / behind another app / on another Space**, you *also* get a **native macOS notification** with a primary action button (*Join & record* / *Record* / *Stop recording*) so you're alerted wherever your attention is (when Obsidian is already in front, the native one is skipped — it would just duplicate the in-app notice). Clicking the notification body brings Obsidian forward to the in-app prompt with the full set of choices (*Join*, *Open note*, …).
 - Right-click a meeting note (or use the editor menu) to run the same actions — transcribe, enrich, open recording, join link.
+
+### Getting the best notifications on macOS
+
+When Obsidian isn't in front, the plugin posts a native notification, but **macOS** controls whether it pops up on screen or lands silently in Notification Center — an app can't override this. (Either way the in-app prompt is still waiting for you inside Obsidian.) If prompts only show up in Notification Center, check these (there's a shortcut button in the plugin's **Notifications** settings that opens the right pane):
+
+- **Focus / Do Not Disturb** suppresses banners and routes notifications straight to Notification Center. Because a Focus can be scheduled or auto-activate (e.g. during calendar events), this often looks "random". Turn it off, or allow Obsidian through your Focus filter, to see prompts live.
+- **Make them stay on screen with a button.** Set Obsidian to the **Alerts** style (**System Settings → Notifications → Obsidian → "Alerts"**). In the default **Banners** style macOS auto-dismisses notifications after a few seconds and collapses actions under an **"Options"** affordance. Note: macOS/Electron can only show **one** notification action as a named button (the primary — e.g. *Join & record*); the remaining choices open when you click the notification body.
+- **While recording or mirroring a display**, macOS hides banners unless you turn on **System Settings → Notifications → "Allow notifications when mirroring or sharing the display"** (off by default).
+
+### Debugging notifications
+
+If prompts still misbehave and you want to file a bug report, you can turn on
+notification tracing. It's **off by default**, so normally nothing extra is
+logged and no extra command exists.
+
+1. Open the DevTools console (**Cmd+Opt+I** → **Console**) and run:
+
+```js
+localStorage.setItem("mc:notif-debug", "1")
+```
+
+2. Reload the plugin (toggle **Meeting Copilot** off/on, or restart Obsidian).
+
+You'll now get:
+
+- `[mc:notif] …` traces of the whole notification pipeline (window focus,
+  which channel was used, and every native/web notification event). They're
+  logged at the normal console level so tools that export the console capture
+  them — paste these into a bug report.
+- A **"Debug test meeting notification"** command in the palette that fires a
+  sample prompt after 4 s (click away first to test the not-focused path).
+
+The flag is read when the plugin loads, so it only takes full effect after a
+reload — and the debug command likewise only appears while the flag was set at
+load time. To turn everything back off:
+
+```js
+localStorage.removeItem("mc:notif-debug")
+```
+
+then reload the plugin again (this also removes the debug command from the
+palette).
 
 ## Settings
 
