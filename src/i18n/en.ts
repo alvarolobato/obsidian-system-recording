@@ -49,6 +49,12 @@ export const en = {
 		alreadyRecording: "Already recording",
 		macOnly: "System recording is only supported on macOS",
 		downloadingHelper: "Downloading recorder helper…",
+		downloadingModel: "Downloading local Whisper model…",
+		downloadingRuntime: "Downloading recorder components…",
+		localFallback:
+			"Local transcription failed — falling back to the remote service.",
+		localFallbackNoDiarization:
+			"Local transcription failed — falling back to the remote service (without speaker separation).",
 		micUnavailable: (device: string) =>
 			`Microphone "${device}" isn't available — recording with the system default.`,
 		recordingStarted: "Recording started",
@@ -419,6 +425,47 @@ export const en = {
 			desc: "Verify the endpoint and load the models available for transcription and enrichment in one step.",
 		},
 		transcriptionHeading: "Transcription",
+		transcriptionEngine: {
+			name: "Transcription engine",
+			desc: "Where audio is transcribed. Remote sends audio to the OpenAI-compatible endpoint configured above. Local runs a Whisper model entirely on this Mac (Apple Silicon) — audio never leaves the device and there are no per-minute API costs, at the price of a one-time model download.",
+			remote: "Remote (API endpoint)",
+			local: "Local (on-device Whisper)",
+		},
+		localModel: {
+			name: "Local model",
+			desc: "The on-device Whisper model. Larger models are more accurate but slower and use more memory. All are multilingual — set the language below, or leave it on auto-detect.",
+			/** Descriptive label for a model id in the picker (size is appended separately). */
+			option: (id: string): string => {
+				switch (id) {
+					case "small-q5_1":
+						return "Small — fastest, least accurate";
+					case "medium-q5_0":
+						return "Medium — balanced";
+					case "large-v3-turbo-q5_0":
+						return "Large v3 Turbo — most accurate (recommended)";
+					default:
+						return id;
+				}
+			},
+		},
+		localModelDownload: {
+			name: "Model file",
+			missing: (size: string) =>
+				`Not downloaded yet (${size}). Download it once — it's stored in this vault's plugin folder and reused for every meeting.`,
+			present: (size: string) =>
+				`Downloaded (${size}) — ready for local transcription.`,
+			downloading: (pct: number) => `Downloading… ${pct}%`,
+			download: "Download",
+			delete: "Delete",
+			cancel: "Cancel",
+			done: "Local model downloaded.",
+			cancelled: "Model download cancelled.",
+			failed: (reason: string) => `Model download failed: ${reason}`,
+		},
+		localFallback: {
+			name: "Fall back to remote on failure",
+			desc: "If local transcription fails (for example the model isn't downloaded, or the helper errors), transcribe with the remote endpoint instead — when one is configured.",
+		},
 		sttModel: {
 			name: "Transcription model",
 			desc: "Model sent to the endpoint. Run 'Load models' above to list the models your endpoint exposes — when it reports capabilities, the list is narrowed to speech-to-text models. Chat models like gpt-4o can't transcribe; use gpt-4o-transcribe or whisper. You can also type a gateway deployment name such as llm-gateway/whisper.",
@@ -433,6 +480,8 @@ export const en = {
 		diarization: {
 			name: "Separate my voice from others",
 			desc: "Transcribes the mic and system audio channels separately so your side of the conversation can be told apart from everyone else's. Roughly doubles transcription cost, and needs a Whisper model whose endpoint returns timestamps — check the Timestamp support badge above.",
+			descLocal:
+				"Transcribes the mic and system audio channels separately so your side of the conversation can be told apart from everyone else's. Runs two on-device passes, so it takes roughly twice as long. Local Whisper always provides timestamps, so no endpoint check is needed.",
 		},
 		recheckSupport: {
 			button: "Recheck",
@@ -469,6 +518,7 @@ export const en = {
 		sttLanguage: {
 			name: "Language",
 			desc: "ISO 639-1 code (e.g. en, ja, ko, zh, es, de, fr) or 'auto' to detect. Use the two-letter code — full names like 'Spanish' will cause a 400 error from the API.",
+			placeholder: "Auto-detect",
 		},
 		dictionaryCorrection: {
 			name: "Custom dictionary correction",

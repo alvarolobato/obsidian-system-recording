@@ -3,7 +3,8 @@
 Working notes for AI agents (and humans) contributing to **Meeting Copilot**, an
 Obsidian plugin that brings Granola-style meeting capture to Obsidian: Google
 Calendar sync, dual-channel recording via a macOS Swift helper, transcription
-(vendored engine, OpenAI-compatible / LiteLLM endpoints), and LLM enrichment.
+(remote OpenAI-compatible / LiteLLM endpoints **or** local on-device whisper.cpp),
+and LLM enrichment.
 
 Repo: `alvarolobato/obsidian-meeting-copilot`. Platform: macOS only (the
 recorder helper captures system audio with a Core Audio process tap on macOS
@@ -14,12 +15,12 @@ recorder helper captures system audio with a Core Audio process tap on macOS
 - `src/` — plugin TypeScript. Entry point `src/main.ts`.
   - `src/calendar/` — Google Calendar API + OAuth (`googleOAuth.ts`), scheduler.
   - `src/notes/` — meeting-note creation, folder resolution, transcript/enriched blocks, dashboard.
-  - `src/transcribe/` — transcription orchestrator + **vendored** engine under `src/transcribe/vendor/` (see below).
+  - `src/transcribe/` — backend-agnostic orchestrator (`TranscriptionService.ts`) behind the `TranscriptionBackend` seam (`backend.ts`); the remote engine (`OpenAICompatibleBackend.ts` + **vendored** engine under `src/transcribe/vendor/`, see below) and the local engine (`WhisperCppBackend.ts` + model registry `localModels.ts`).
   - `src/enrich/` — enrichment prompts.
   - `src/detect/` — meeting detection (Zoom/Meet probes).
   - `src/ui/` — agenda sidebar view and modals.
   - `src/i18n/` — localization; **English is the base language** (`en.ts`). UI strings go through `t()`.
-- `swift-helper/` — the `SystemRecorder` Swift package (dual-channel audio capture). Built into the `system-recorder` binary shipped with the plugin.
+- `swift-helper/` — the `SystemRecorder` Swift package (dual-channel audio capture + the `transcribe` subcommand in `Transcribe.swift`, which drives whisper.cpp over Metal and streams NDJSON). Built into the `system-recorder` binary; links whisper.cpp's **dynamic** `whisper.framework`, so the `whisper` dylib ships in the `whisper.framework/Versions/Current/whisper` layout next to the binary.
   - System audio: `SystemAudioProcessTap.swift` (Core Audio process tap + private aggregate device, macOS 14.4+) with `AudioCaptureManager.startSystemStream` (ScreenCaptureKit) as the pre-14.4 / failure fallback. Mic: `AVAudioEngine`. Both feed `AudioMixer` (24 kHz mono, `.me`/`.them` split sidecars).
 - `.github/workflows/` — `ci.yml` (PRs + pushes to main) and `release.yml` (version tags).
 - `manifest.json`, `versions.json`, `styles.css`, `esbuild.config.mjs`.
@@ -166,6 +167,23 @@ a re-download loop every load.
 Do **not** commit a locally pinned `EXPECTED_SHA256` — the sha is machine/build
 specific and CI owns that value for releases.
 
+**Whisper dylib (`--swift`):** because the helper links `whisper.framework`
+dynamically, `deploy-local.mjs` with `--swift` also stages the built `whisper`
+dylib into the **exact release layout** —
+`whisper.framework/Versions/Current/whisper` as a real file (not the SwiftPM
+build's absolute symlink) — so the deployed plugin is self-contained and matches
+what `AssetProvisioner` writes for shipped users. The helper resolves it via an
+`@loader_path` rpath at launch, so a missing/misplaced dylib fails dyld **before
+`main()`** — breaking recording, not just transcription. Unlike the binary's
+`EXPECTED_SHA256` (a `main` placeholder that `release.yml` **re-pins** at tag
+time), `EXPECTED_WHISPER_SHA256` / `WHISPER_DYLIB_SIZE` in `src/binary.ts` are
+**fixed committed constants** for the pinned XCFramework: `release.yml` only
+*verifies* the freshly built dylib against them and fails loudly on a mismatch,
+so refresh both by hand when you bump the XCFramework (never a `deploy-local`
+placeholder). Local Whisper **models** are downloaded on demand into the
+plugin's `models/` dir and pinned by SHA-256 in `localModels.ts`; they're never
+bundled or deployed.
+
 **Screen Recording permission (macOS/TCC):** with `--swift` the binary's code
 hash changes, so macOS may treat it as new and require re-granting permission.
 If recording starts then immediately stops with a permission error, re-approve
@@ -181,9 +199,12 @@ Security → Screen Recording and restart Obsidian.
 ## Releases
 
 Releases are cut by pushing a semver tag; `release.yml` builds everything on a
-macOS runner, pins the freshly built binary's sha into the bundle, and publishes
-a GitHub Release with `main.js`, `manifest.json`, `styles.css`, and
-`system-recorder`.
+macOS runner, pins the freshly built binary's sha into the bundle, verifies the
+built `whisper` dylib against the pinned `EXPECTED_WHISPER_SHA256` **and**
+`WHISPER_DYLIB_SIZE` (an XCFramework bump that refreshes only one would fail the
+build rather than ship an unverified dylib), and publishes a GitHub Release with
+`main.js`, `manifest.json`, `styles.css`, `system-recorder`, `whisper`, and
+`fvad.wasm` (the bundled WebRTC-VAD module — a missing copy degrades gracefully).
 
 ```bash
 git tag -a 0.2.0 -m "0.2.0"
@@ -204,9 +225,31 @@ current (e.g. `actions/checkout@v5`, `actions/setup-node@v5`).
   localStorage write.
 - **Vendored transcriber (`src/transcribe/vendor/`):** keep vendored files as
   pristine as possible for easy upstream updates. Our config/endpoint glue lives
-  in `src/transcribe/TranscriptionService.ts` + `endpointConfig.ts`; the base
+  in `src/transcribe/OpenAICompatibleBackend.ts` + `endpointConfig.ts`; the base
   URL / model overrides are injected via a small seam, not by rewriting vendored
   code. See `src/transcribe/vendor/VENDOR.md`.
+- **Transcription backend seam (`src/transcribe/backend.ts`):** transcription
+  goes through a pluggable `TranscriptionBackend` (`transcribe(request) =>
+  JobResult[]` + `validateConfig()`). `TranscriptionService.ts` is a
+  backend-agnostic *orchestrator* (diarized job construction, capability-miss
+  classification, merge, probe invalidation); the OpenAI-compatible engine —
+  vendored controller, process-global endpoint seam, serial queue, `PLAIN::`
+  key contract, pre-gate encoding, engine-progress band — is fully contained in
+  `OpenAICompatibleBackend`. The serial queue is module-scoped in
+  `OpenAICompatibleBackend` (the endpoint globals it guards are process-wide),
+  so building a fresh backend per transcription is safe.
+- **Local backend (`src/transcribe/WhisperCppBackend.ts`, issue #34):** drops in
+  against the same interface. Runs *all* jobs in one helper process (manifest
+  lists them) so the model loads once; owns the NDJSON line protocol, per-job
+  progress slicing, and SIGTERM cancellation. It has **no** module serial queue
+  (no process-global to guard) and does **not** forward `speechWindows` (no
+  upload to trim; the diarized merge drops out-of-window/hallucinated segments
+  after the fact). The 25 MB / chunk-count limits are **remote-only** — never
+  port them here; whisper.cpp handles arbitrary length via its 30 s windows.
+  `buildLocalBackend()` in `main.ts` co-provisions the binary + `whisper` dylib
+  (`ensureHelperRuntime()`, shared with recording/device-listing) and the model,
+  then constructs the backend; `localFallbackToRemote` retries a failed local
+  run remotely (non-diarized), never on an abort.
 - **System-audio capture:** the process tap (`SystemAudioProcessTap`) is a
   *private, auto-starting aggregate device* wrapping a `CATapDescription`
   (global mono mixdown, `.unmuted` so the user still hears the meeting). It's

@@ -90,6 +90,32 @@ jobs:
           echo "sha256=${SHA}" >> "$GITHUB_OUTPUT"
           echo "Helper SHA-256: ${SHA}"
 
+      # Ship the whisper.cpp dylib the helper links for on-device transcription
+      # (issue #34). It's constant across releases (pinned XCFramework), so we
+      # DON'T re-pin it — we assert the freshly built bytes still match the
+      # EXPECTED_WHISPER_SHA256 baked into main.js, failing loudly if the pinned
+      # framework version drifted from the constant in src/binary.ts.
+      - name: Stage whisper dylib + verify pinned checksum
+        run: |
+          cp swift-helper/.build/release/whisper.framework/Versions/A/whisper whisper
+          BUILT_SHA=$(shasum -a 256 whisper | cut -d' ' -f1)
+          BUILT_SIZE=$(wc -c < whisper | tr -d ' ')
+          PINNED_SHA=$(node -e 'const fs=require("fs");const m=fs.readFileSync("src/binary.ts","utf8").match(/EXPECTED_WHISPER_SHA256\s*=\s*"([0-9a-f]+)"/);process.stdout.write(m?m[1]:"")')
+          PINNED_SIZE=$(node -e 'const fs=require("fs");const m=fs.readFileSync("src/binary.ts","utf8").match(/WHISPER_DYLIB_SIZE\s*=\s*(\d+)/);process.stdout.write(m?m[1]:"")')
+          echo "whisper dylib: sha=${BUILT_SHA} size=${BUILT_SIZE} (pinned sha=${PINNED_SHA} size=${PINNED_SIZE})"
+          # Guard a regex miss (constant renamed/reformatted) so we don't compare
+          # against an empty string and ship an unverified dylib.
+          if [ -z "${PINNED_SHA}" ] || [ -z "${PINNED_SIZE}" ]; then
+            echo "::error::Could not parse EXPECTED_WHISPER_SHA256 / WHISPER_DYLIB_SIZE from src/binary.ts"
+            exit 1
+          fi
+          # Both must match: an XCFramework bump that refreshed only one constant
+          # would otherwise pass here but break AssetProvisioner for end users.
+          if [ "${BUILT_SHA}" != "${PINNED_SHA}" ] || [ "${BUILT_SIZE}" != "${PINNED_SIZE}" ]; then
+            echo "::error::Shipped whisper dylib (sha=${BUILT_SHA}, size=${BUILT_SIZE}) != pinned (sha=${PINNED_SHA}, size=${PINNED_SIZE}). Refresh EXPECTED_WHISPER_SHA256 + WHISPER_DYLIB_SIZE in src/binary.ts for the new XCFramework."
+            exit 1
+          fi
+
       - name: Pin helper checksum into the plugin build
         env:
           SHA: ${{ steps.sha.outputs.sha256 }}
@@ -124,10 +150,10 @@ jobs:
           # assets on an existing release instead of erroring out.
           if gh release view "${TAG}" >/dev/null 2>&1; then
             gh release upload "${TAG}" --clobber \
-              main.js manifest.json styles.css system-recorder fvad.wasm
+              main.js manifest.json styles.css system-recorder whisper fvad.wasm
           else
             gh release create "${TAG}" \
               --title "${TAG}" \
               --generate-notes \
-              main.js manifest.json styles.css system-recorder fvad.wasm
+              main.js manifest.json styles.css system-recorder whisper fvad.wasm
           fi

@@ -34,6 +34,20 @@ function sha256(file) {
 	return crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex");
 }
 
+// Replace a Mach-O's *linker-signed* ad-hoc signature (what `swift build`
+// emits) with a plain, location-independent ad-hoc signature. The kernel accepts
+// a linker-signed executable only at the path the linker created it; once copied
+// (into the vault, or here even hashed-then-copied) macOS's code-signing monitor
+// SIGKILLs it at launch with "Code Signature Invalid / Invalid Page" before
+// main(). `codesign --force --sign -` fixes that and launches from anywhere.
+// Only the main executable needs this — dyld still loads a copied linker-signed
+// dylib fine. Done in .build before hashing so the pinned sha matches the
+// deployed binary. (Release assets are downloaded, which re-blesses them, so
+// this is a local-deploy-only fixup.)
+function adhocSign(file) {
+	execFileSync("codesign", ["--force", "--sign", "-", file], { stdio: "inherit" });
+}
+
 if (!fs.existsSync(DEST)) {
 	die(`vault plugin dir not found: ${DEST}\n  set VAULT_PLUGIN_DIR to override.`);
 }
@@ -56,6 +70,9 @@ if (withSwift) {
 	];
 	deployBinaryFrom = candidates.find((p) => fs.existsSync(p));
 	if (!deployBinaryFrom) die("built SystemRecorder not found under swift-helper/.build");
+	// Re-sign before hashing so the sha we pin matches the binary we actually
+	// deploy (the copy would otherwise invalidate its linker-signed signature).
+	adhocSign(deployBinaryFrom);
 	sha = sha256(deployBinaryFrom);
 } else {
 	const vaultBinary = path.join(DEST, "system-recorder");
@@ -96,6 +113,32 @@ if (deployBinaryFrom) {
 	const target = path.join(DEST, "system-recorder");
 	fs.copyFileSync(deployBinaryFrom, target);
 	fs.chmodSync(target, 0o755);
+
+	// The helper links whisper.cpp's *dynamic* framework (issue #34): the binary
+	// references @rpath/whisper.framework/Versions/Current/whisper and resolves
+	// it at launch via SwiftPM's @loader_path rpath, so the dylib MUST sit next
+	// to the binary or dyld fails before main() — breaking recording, not just
+	// transcription. Reproduce the EXACT layout the release-time AssetProvisioner
+	// writes for shipped users: a plain file at Versions/Current/whisper (a real
+	// directory, no symlinks). Copying the built dylib (not the whole framework,
+	// whose Versions/Current is an absolute symlink into this worktree's .build)
+	// keeps the deployed plugin self-contained and validates the product layout.
+	const builtDylib = path.join(
+		path.dirname(deployBinaryFrom),
+		"whisper.framework/Versions/A/whisper"
+	);
+	if (!fs.existsSync(builtDylib)) {
+		die(`built whisper dylib not found at ${builtDylib}`);
+	}
+	const frameworkDest = path.join(DEST, "whisper.framework");
+	fs.rmSync(frameworkDest, { recursive: true, force: true });
+	const dylibDest = path.join(frameworkDest, "Versions", "Current", "whisper");
+	fs.mkdirSync(path.dirname(dylibDest), { recursive: true });
+	// The copied dylib keeps its linker-signed signature: dyld loads it fine
+	// (only the *main executable* is rejected after a copy — see adhocSign), and
+	// leaving it untouched preserves the byte size the plugin's provisioner
+	// checks against WHISPER_DYLIB_SIZE.
+	fs.copyFileSync(builtDylib, dylibDest);
 }
 
 console.log(`deploy-local: deployed to ${DEST}`);

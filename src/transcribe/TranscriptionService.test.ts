@@ -120,8 +120,9 @@ describe("normalizeEngineProgress", () => {
 	});
 
 	it("keeps the diarized halves within their 0–50 / 50–100 lanes", () => {
-		// main.ts scales "me" by 0.5 and offsets "them" by 50; a full engine
-		// pass must never cross the midpoint or exceed 100.
+		// The backend's shared job runner slices "me" onto 0–50 and "them" onto
+		// 50–100 (see runJobsSequentially); a full engine pass, once normalized,
+		// must never cross the midpoint or exceed 100.
 		const me = (p: number) => normalizeEngineProgress(p) * 0.5;
 		const them = (p: number) => 50 + normalizeEngineProgress(p) * 0.5;
 		expect(me(10)).toBe(0);

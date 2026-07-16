@@ -236,6 +236,72 @@ describe("mergeDiarized", () => {
 		});
 	});
 
+	describe("cross-segment decoder loops", () => {
+		it("collapses a 5+ word clause repeated across consecutive segments to one", () => {
+			// The real bug: Whisper's decoder loops on a near-silent channel and
+			// emits the same clause as many back-to-back segments. Per-segment
+			// collapse can't see across the seam, so without this it stays ~15 lines.
+			const me = [
+				seg("And then you take two small bananas", 10, 12),
+				seg("And then you take two small bananas", 13, 15),
+				seg("And then you take two small bananas", 16, 18),
+				seg("And then you take two small bananas", 19, 21),
+			];
+			expect(mergeDiarized(me, [])).toBe("Me: And then you take two small bananas");
+		});
+
+		it("keeps a short phrase repeated only twice (below the 3× threshold)", () => {
+			const me = [seg("all right", 0, 1), seg("all right", 2, 3)];
+			expect(mergeDiarized(me, [])).toBe("Me: all right all right");
+		});
+
+		it("collapses a 2–4 word phrase repeated 3× to one", () => {
+			const me = [seg("all right", 0, 1), seg("all right", 2, 3), seg("all right", 4, 5)];
+			expect(mergeDiarized(me, [])).toBe("Me: all right");
+		});
+
+		it("collapses a single word repeated 4×+ to two", () => {
+			const me = [
+				seg("okay", 0, 1),
+				seg("okay", 2, 3),
+				seg("okay", 4, 5),
+				seg("okay", 6, 7),
+				seg("okay", 8, 9),
+			];
+			expect(mergeDiarized(me, [])).toBe("Me: okay okay");
+		});
+
+		it("leaves a repeat that is NOT consecutive (real speech between) alone", () => {
+			const me = [
+				seg("two small bananas", 0, 2),
+				seg("something else entirely", 3, 5),
+				seg("two small bananas", 6, 8),
+			];
+			expect(mergeDiarized(me, [])).toBe(
+				"Me: two small bananas something else entirely two small bananas"
+			);
+		});
+
+		it("collapses a loop split unevenly across segments once folded onto a line", () => {
+			// Neither segment loops enough on its own, and their normalized text
+			// differs so the per-run collapse skips them, but the folded line is a
+			// single-word loop the folded-line collapseRepetitions trims.
+			const me = [seg("go go go", 0, 1), seg("go go", 2, 3)];
+			expect(mergeDiarized(me, [])).toBe("Me: go go");
+		});
+
+		it("collapses the loop on the looping stream only, not the other speaker", () => {
+			const me = [
+				seg("yep totally agree with that", 0, 2),
+				seg("yep totally agree with that", 3, 5),
+			];
+			const them = [seg("here is my actual point", 6, 8)];
+			expect(mergeDiarized(me, them)).toBe(
+				["Me: yep totally agree with that", "Them: here is my actual point"].join("\n")
+			);
+		});
+	});
+
 	describe("speech-window filtering", () => {
 		it("keeps a segment overlapping a window and drops one outside every window", () => {
 			const me = [seg("real speech", 10, 12), seg("ghost line", 40, 41)];

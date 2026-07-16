@@ -219,10 +219,69 @@ function dropCrossTalk(meSegs: DiarSegment[], themSegs: DiarSegment[]): DiarSegm
 	});
 }
 
+/** Word count used by the length-aware repetition thresholds below. */
+function wordCount(text: string): number {
+	return text
+		.trim()
+		.split(/\s+/)
+		.filter((w) => w.length > 0).length;
+}
+
 /**
- * Sort a single stream by start, drop the duplicate a segment picks up from an
- * overlapping chunk boundary, then (when we have them) drop segments that fall
- * outside the stream's own speech windows.
+ * Normalized key for comparing two segments' text: case-, punctuation-, and
+ * whitespace-insensitive, so "two small bananas." and "Two small bananas"
+ * fold onto the same loop unit.
+ */
+function segmentKey(text: string): string {
+	return text
+		.toLowerCase()
+		.replace(/[^\p{L}\p{N}]+/gu, " ")
+		.trim()
+		.replace(/\s+/g, " ");
+}
+
+/**
+ * Collapse a decoder loop that spans WHOLE segments. When Whisper's decoder
+ * gets stuck it repeats a phrase as many back-to-back segments, each with its
+ * own timestamp ("… take two small bananas." ×15). The per-segment
+ * collapseRepetitions in prepareStream can't see across the segment seam, so
+ * the loop survives as a dozen identical lines. Here we fold a run of
+ * CONSECUTIVE segments (the list is already sorted by start) whose text is
+ * identical after normalization, using the same length-aware thresholds as
+ * collapseRepetitions: a single word must repeat ≥4× (keep two), a 2–4 word
+ * phrase ≥3× (keep one), a 5+ word clause ≥2× (keep one). Non-consecutive
+ * repeats — the same phrase said again later with other speech between — are
+ * left untouched, so a genuinely repeated line survives.
+ */
+function collapseRepeatedSegments(segments: DiarSegment[]): DiarSegment[] {
+	const minReps = (n: number): number => (n === 1 ? 4 : n <= 4 ? 3 : 2);
+	const keepCount = (n: number): number => (n === 1 ? 2 : 1);
+
+	const out: DiarSegment[] = [];
+	let i = 0;
+	while (i < segments.length) {
+		const cur = segments[i] as DiarSegment;
+		const key = segmentKey(cur.text);
+		let run = 1;
+		while (
+			i + run < segments.length &&
+			segmentKey((segments[i + run] as DiarSegment).text) === key
+		) {
+			run++;
+		}
+		const n = wordCount(cur.text);
+		const keep = key.length > 0 && run >= minReps(n) ? Math.min(keepCount(n), run) : run;
+		for (let r = 0; r < keep; r++) out.push(segments[i + r] as DiarSegment);
+		i += run;
+	}
+	return out;
+}
+
+/**
+ * Sort a single stream by start, collapse a decoder loop that spans whole
+ * segments, drop the duplicate a segment picks up from an overlapping chunk
+ * boundary, then (when we have them) drop segments that fall outside the
+ * stream's own speech windows.
  *
  * The whisper engine chunks with overlap and its WorkflowResult.segments is a
  * plain concat of every chunk's segments, so a segment that lands in the shared
@@ -246,8 +305,13 @@ function prepareStream(segments: DiarSegment[], windows?: Array<[number, number]
 		.filter((s) => !isHallucinationPhrase(s.text))
 		.sort((a, b) => a.start - b.start || a.end - b.end);
 
+	// Fold a runaway decoder loop that spans whole segments (the per-segment
+	// collapse above only sees within one segment). Done after the sort so a run
+	// is contiguous in time order.
+	const collapsed = collapseRepeatedSegments(sorted);
+
 	const deduped: DiarSegment[] = [];
-	for (const seg of sorted) {
+	for (const seg of collapsed) {
 		// A chunk-overlap duplicate sits on top of an already-kept segment with
 		// the same text. Scan back over recent kept segments while they still
 		// overlap this one in time; since the list is sorted by start, stop once
@@ -318,11 +382,16 @@ export function mergeDiarized(me: DiarSegment[], them: DiarSegment[], windows?: 
 		}
 	}
 
-	// Catch a hallucination Whisper split across adjacent segments ("Thanks" +
-	// "for watching") that each slipped the per-segment filter but reconstitute
-	// into a stock phrase once folded onto one speaker line. A fully-silent
-	// stream is the common case here (its whole line is the split phrase).
+	// Two clean-ups once same-speaker segments are folded onto one line:
+	//  1. Re-run collapseRepetitions on the folded text so a loop split unevenly
+	//     across segments ("go go go" + "go go") collapses on the joined line
+	//     even though neither segment tripped the per-segment/per-run collapse.
+	//  2. Catch a hallucination Whisper split across adjacent segments ("Thanks"
+	//     + "for watching") that each slipped the per-segment filter but
+	//     reconstitute into a stock phrase once folded. A fully-silent stream is
+	//     the common case (its whole line is the split phrase).
 	return lines
+		.map((line) => ({ speaker: line.speaker, text: collapseRepetitions(line.text) }))
 		.filter((line) => !isHallucinationPhrase(line.text))
 		.map((line) => `${SPEAKERS[line.speaker].label}: ${line.text}`)
 		.join("\n");

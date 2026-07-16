@@ -3,7 +3,7 @@ import AVFoundation
 
 // MARK: - Argument parsing
 
-let usage = "Usage: system-recorder start --output <path> --stop-file <path> [--split] [--format \(RecordingFormat.usageList)] [--input-device <uid>]\n       system-recorder list-devices"
+let usage = "Usage: system-recorder start --output <path> --stop-file <path> [--split] [--format \(RecordingFormat.usageList)] [--input-device <uid>]\n       system-recorder list-devices\n       system-recorder transcribe --manifest <path>"
 
 // MARK: - JSON output helper
 
@@ -30,6 +30,14 @@ if args.count >= 2, args[1] == "list-devices" {
     let devices = AudioDevices.inputDevices().map { ["uid": $0.uid, "name": $0.name] }
     emitJSON(["devices": devices])
     exit(0)
+}
+
+// `transcribe`: on-device Whisper transcription (issue #34). Reads a JSON
+// manifest (model path + audio jobs), streams NDJSON progress/result/done, then
+// exits. Placed before the `start` guard so it never falls through into
+// recording. runTranscribe(...) never returns.
+if args.count >= 2, args[1] == "transcribe" {
+    runTranscribe(Array(args.dropFirst(2)))
 }
 
 guard args.count >= 6,
@@ -295,6 +303,10 @@ if #available(macOS 13.0, *) {
     RunLoop.current.run(until: Date.distantFuture)
 
 } else {
-    emitJSON(["status": "error", "message": "macOS 13.0 or later is required"])
+    // Unreachable in practice: the package targets macOS 13.3 (the whisper
+    // framework's floor) and dyld rejects the binary on anything older before
+    // main() runs. Kept as a guard for the macOS 13 ScreenCaptureKit APIs, with
+    // the message matching the real requirement.
+    emitJSON(["status": "error", "message": "macOS 13.3 or later is required"])
     exit(1)
 }
