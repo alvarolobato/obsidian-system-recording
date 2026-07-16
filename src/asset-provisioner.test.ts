@@ -191,6 +191,38 @@ describe("AssetProvisioner", () => {
 		expect(downloads).toBe(1);
 	});
 
+	it("threads the abort signal through to downloadToFile", async () => {
+		const ac = new AbortController();
+		let seenSignal: AbortSignal | undefined;
+		const deps = makeDeps({
+			fileExists: async () => false,
+			downloadToFile: async (_u, _p, _prog, signal) => {
+				seenSignal = signal;
+			},
+		});
+		await new AssetProvisioner(deps).ensure(DEST, URL, SHA, SIZE, {
+			signal: ac.signal,
+		});
+		expect(seenSignal).toBe(ac.signal);
+	});
+
+	it("preserves an AbortError (cleaning up) instead of wrapping it as a failure", async () => {
+		const unlink = vi.fn(async () => undefined);
+		const deps = makeDeps({
+			fileExists: async () => false,
+			downloadToFile: async () => {
+				const err = new Error("The operation was aborted");
+				err.name = "AbortError";
+				throw err;
+			},
+			unlink,
+		});
+		await expect(
+			new AssetProvisioner(deps).ensure(DEST, URL, SHA, SIZE)
+		).rejects.toMatchObject({ name: "AbortError" });
+		expect(unlink).toHaveBeenCalledWith(`${DEST}.tmp`);
+	});
+
 	it("fires onDownloadStart only when a download actually happens", async () => {
 		const cb = vi.fn();
 		await new AssetProvisioner(

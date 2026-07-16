@@ -463,7 +463,14 @@ export default class SystemRecordingPlugin extends Plugin {
         if (this.settings.transcriptionBackend !== "local") {
             this.settings.transcriptionBackend = "remote";
         }
-        if (!(this.settings.localWhisperModel in LOCAL_MODELS)) {
+        // Own-property check, not `in`: `in` walks the prototype chain, so a
+        // hand-edited "constructor"/"toString"/etc. would slip past the clamp.
+        if (
+            !Object.prototype.hasOwnProperty.call(
+                LOCAL_MODELS,
+                this.settings.localWhisperModel
+            )
+        ) {
             this.settings.localWhisperModel = DEFAULT_SETTINGS.localWhisperModel;
         }
         // Migrate the previously enrichment-only endpoint into the shared fields
@@ -1873,7 +1880,8 @@ export default class SystemRecordingPlugin extends Plugin {
      */
     ensureLocalModel(
         spec: LocalModelSpec,
-        onProgress?: (received: number, total: number) => void
+        onProgress?: (received: number, total: number) => void,
+        signal?: AbortSignal
     ): Promise<string> {
         return this.modelProvisioner.ensure(
             this.localModelPath(spec),
@@ -1889,6 +1897,7 @@ export default class SystemRecordingPlugin extends Plugin {
                     ? (received, total) =>
                           onProgress(received, total > 0 ? total : spec.sizeBytes)
                     : undefined,
+                signal,
             }
         );
     }
@@ -2289,7 +2298,14 @@ export default class SystemRecordingPlugin extends Plugin {
                     "[Meeting Copilot] local transcription failed; falling back to the remote service",
                     e
                 );
-                new Notice(t().notices.localFallback);
+                // Say diarization was dropped when the user asked for it: the
+                // remote fallback is always a plain mixed pass, so a forced
+                // speaker-separated request silently becomes mixed otherwise.
+                new Notice(
+                    wantDiarized
+                        ? t().notices.localFallbackNoDiarization
+                        : t().notices.localFallback
+                );
                 // Reset the bar so the remote pass ramps 0→100 instead of jumping
                 // backward from wherever the failed local attempt left it.
                 onProgress(0);

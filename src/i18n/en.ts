@@ -47,6 +47,8 @@ export const en = {
 		downloadingRuntime: "Downloading recorder components…",
 		localFallback:
 			"Local transcription failed — falling back to the remote service.",
+		localFallbackNoDiarization:
+			"Local transcription failed — falling back to the remote service (without speaker separation).",
 		micUnavailable: (device: string) =>
 			`Microphone "${device}" isn't available — recording with the system default.`,
 		recordingStarted: "Recording started",
@@ -396,7 +398,9 @@ export const en = {
 			downloading: (pct: number) => `Downloading… ${pct}%`,
 			download: "Download",
 			delete: "Delete",
+			cancel: "Cancel",
 			done: "Local model downloaded.",
+			cancelled: "Model download cancelled.",
 			failed: (reason: string) => `Model download failed: ${reason}`,
 		},
 		localFallback: {

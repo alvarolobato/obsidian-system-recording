@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { EventEmitter } from "events";
 import { PassThrough } from "stream";
 import { TFile } from "obsidian";
@@ -347,5 +347,68 @@ describe("WhisperCppBackend", () => {
 		const h = makeHarness();
 		expect(await h.backend.transcribe({ jobs: [] })).toEqual([]);
 		expect(h.spawned).toHaveLength(0);
+	});
+
+	it("rejects with the helper's error message even when it exits 0", async () => {
+		const h = makeHarness();
+		const p = h.backend.transcribe({ jobs: [job("single")] });
+		await flush();
+		// An error line but a zero exit code: the message must win over the code.
+		h.proc().stdout.write('{"type":"error","message":"model failed verification"}\n');
+		await flush();
+		h.proc().emit("close", 0, null);
+		await expect(p).rejects.toThrow("model failed verification");
+	});
+
+	it("cleans up and never spawns when aborted between manifest write and spawn", async () => {
+		const ctrl = new AbortController();
+		const cleaned: string[] = [];
+		const spawned: string[] = [];
+		const deps: WhisperCppDeps = {
+			// Abort exactly as the manifest finishes writing, so the post-write
+			// re-check inside transcribe() (not the pre-write one) fires.
+			spawn: (bin, args): WhisperChildProcess => {
+				spawned.push(bin + " " + args.join(" "));
+				return new FakeProcess();
+			},
+			writeManifest: async () => {
+				ctrl.abort();
+				return "/tmp/manifest.json";
+			},
+			cleanup: async (p) => {
+				cleaned.push(p);
+			},
+			resolveAudioPath: (f) => `/vault/${f.path}`,
+		};
+		const backend = new WhisperCppBackend(
+			{ binaryPath: "/plugin/system-recorder", modelPath: "/models/ggml.bin", language: "en" },
+			deps
+		);
+		await expect(
+			backend.transcribe({ jobs: [job("single")], signal: ctrl.signal })
+		).rejects.toThrow(/aborted/i);
+		expect(spawned).toHaveLength(0);
+		expect(cleaned).toEqual(["/tmp/manifest.json"]);
+	});
+
+	it("escalates to SIGKILL when the helper ignores SIGTERM after an abort", async () => {
+		// Fake only setTimeout/clearTimeout so flush()'s setImmediate stays real.
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+		try {
+			const h = makeHarness();
+			const ctrl = new AbortController();
+			const p = h.backend.transcribe({ jobs: [job("single")], signal: ctrl.signal });
+			await flush();
+			ctrl.abort();
+			expect(h.proc().kills).toEqual(["SIGTERM"]);
+			// The helper doesn't exit; after the grace period, force-kill it.
+			vi.advanceTimersByTime(10_000);
+			expect(h.proc().kills).toEqual(["SIGTERM", "SIGKILL"]);
+			// Let it finally close so the promise settles (abort wins).
+			h.proc().emit("close", null, "SIGKILL");
+			await expect(p).rejects.toThrow(/aborted/i);
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 });

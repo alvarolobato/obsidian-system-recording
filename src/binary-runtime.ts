@@ -102,13 +102,14 @@ export function assetNodeDeps(): AssetProvisionerDeps {
 				rs.on("data", (chunk) => hash.update(chunk));
 				rs.on("end", () => resolve(hash.digest("hex")));
 			}),
-		downloadToFile: async (url, destPath, onProgress) => {
+		downloadToFile: async (url, destPath, onProgress, signal) => {
 			// Electron's renderer has a streaming fetch; requestUrl would buffer
 			// the whole (500 MB) model into renderer memory, so stream fetch's
 			// body to a write stream instead. This is the one place fetch is
 			// preferred over requestUrl, precisely because it can stream.
+			// The signal aborts a stalled request (fetch has no idle timeout).
 			// eslint-disable-next-line no-restricted-globals -- requestUrl buffers the full body; a 500 MB model must stream to disk
-			const res = await fetch(url);
+			const res = await fetch(url, { signal });
 			if (!res.ok || !res.body) {
 				// Cancel the (unconsumed) body so a non-2xx can't leak a socket.
 				await res.body?.cancel().catch(() => undefined);
@@ -139,7 +140,8 @@ export function assetNodeDeps(): AssetProvisionerDeps {
 			await pipeline(
 				Readable.fromWeb(res.body as NodeWebReadableStream<Uint8Array>),
 				counter,
-				fs.createWriteStream(destPath)
+				fs.createWriteStream(destPath),
+				{ signal }
 			);
 		},
 		rename: (from, to) => fsp.rename(from, to),

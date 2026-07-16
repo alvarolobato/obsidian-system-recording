@@ -42,6 +42,13 @@ import type {
 	ValidationResult,
 } from "./backend";
 
+/**
+ * Grace period after SIGTERM before escalating to SIGKILL on cancellation, so a
+ * wedged helper (stuck before whisper's abort polling begins) can't hold the
+ * transcription-queue slot indefinitely.
+ */
+const KILL_GRACE_MS = 10_000;
+
 /** Everything the local backend needs, resolved from settings + provisioning. */
 export interface WhisperCppConfig {
 	/** Absolute path to the recorder helper (hosts the `transcribe` subcommand). */
@@ -65,10 +72,10 @@ export interface WhisperChildProcess {
 		listener: (code: number | null, signal: string | null) => void
 	): this;
 	on(event: "error", listener: (err: Error) => void): this;
-	// Narrowed to the one signal we send so Node's ChildProcess (whose kill
+	// Narrowed to the two signals we send so Node's ChildProcess (whose kill
 	// takes `number | Signals`) is assignable to this without pulling in the
 	// `NodeJS` global (which the lint config doesn't declare).
-	kill(signal?: "SIGTERM"): boolean;
+	kill(signal?: "SIGTERM" | "SIGKILL"): boolean;
 }
 
 /** Injected I/O so the backend can be tested without a real process or fs. */
@@ -177,16 +184,22 @@ export class WhisperCppBackend implements TranscriptionBackend {
 			let settled = false;
 
 			const signal = req.signal;
-			// SIGTERM makes Transcribe.swift set its cancel flag and exit 130;
-			// `once` so a second abort event can't double-kill.
+			// SIGTERM makes Transcribe.swift set its cancel flag and exit 130.
+			// If the child ignores it (wedged before whisper's abort_callback
+			// polling starts), escalate to SIGKILL after a grace period so an
+			// abort can't hold the transcription-queue slot forever. `once` so a
+			// second abort event can't double-kill.
+			let killTimer: ReturnType<typeof setTimeout> | undefined;
 			const onAbort = (): void => {
 				child.kill("SIGTERM");
+				killTimer = setTimeout(() => child.kill("SIGKILL"), KILL_GRACE_MS);
 			};
 			if (signal) signal.addEventListener("abort", onAbort, { once: true });
 
 			const settle = (fn: () => void): void => {
 				if (settled) return;
 				settled = true;
+				if (killTimer) clearTimeout(killTimer);
 				if (signal) signal.removeEventListener("abort", onAbort);
 				fn();
 			};

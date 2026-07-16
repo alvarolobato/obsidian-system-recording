@@ -289,6 +289,8 @@ export class SystemRecordingSettingTab extends PluginSettingTab {
     private listingDevices = false;
     /** True while a local model download is streaming, so the row shows progress and re-entry is blocked. */
     private downloadingModel = false;
+    /** Aborts the in-flight model download (Cancel button / tab close). Null when idle. */
+    private modelDownloadAbort: AbortController | null = null;
     /** Whole-percent progress of the in-flight local model download (0–100). */
     private downloadProgress = 0;
     /** The on-screen local-model download/status row, updated in place during a download. */
@@ -993,6 +995,14 @@ export class SystemRecordingSettingTab extends PluginSettingTab {
         row.controlEl.empty();
         if (this.downloadingModel) {
             row.setDesc(s.settings.localModelDownload.downloading(this.downloadProgress));
+            // A Cancel button so a stalled download (fetch has no idle timeout)
+            // doesn't lock the Transcription section until a plugin reload.
+            row.addButton((b) =>
+                b
+                    .setButtonText(s.settings.localModelDownload.cancel)
+                    .setWarning()
+                    .onClick(() => this.modelDownloadAbort?.abort())
+            );
             return;
         }
         const present = await this.plugin.localModelPresent(spec);
@@ -1033,27 +1043,40 @@ export class SystemRecordingSettingTab extends PluginSettingTab {
         if (this.downloadingModel) return;
         this.downloadingModel = true;
         this.downloadProgress = 0;
+        const abort = new AbortController();
+        this.modelDownloadAbort = abort;
         // Re-render so the engine/model dropdowns lock and the row shows 0%.
         this.display();
         try {
-            await this.plugin.ensureLocalModel(spec, (received, total) => {
-                const pct = total > 0 ? Math.floor((received / total) * 100) : 0;
-                if (pct !== this.downloadProgress) {
-                    this.downloadProgress = pct;
-                    this.modelDownloadRow?.setDesc(
-                        t().settings.localModelDownload.downloading(pct)
-                    );
-                }
-            });
+            await this.plugin.ensureLocalModel(
+                spec,
+                (received, total) => {
+                    const pct = total > 0 ? Math.floor((received / total) * 100) : 0;
+                    if (pct !== this.downloadProgress) {
+                        this.downloadProgress = pct;
+                        this.modelDownloadRow?.setDesc(
+                            t().settings.localModelDownload.downloading(pct)
+                        );
+                    }
+                },
+                abort.signal
+            );
             new Notice(t().settings.localModelDownload.done);
         } catch (e) {
-            new Notice(
-                t().settings.localModelDownload.failed(
-                    e instanceof Error ? e.message : String(e)
-                )
-            );
+            // A user-initiated cancel surfaces as an AbortError; show a quiet
+            // "cancelled" notice rather than a download-failed error.
+            if (e instanceof Error && e.name === "AbortError") {
+                new Notice(t().settings.localModelDownload.cancelled);
+            } else {
+                new Notice(
+                    t().settings.localModelDownload.failed(
+                        e instanceof Error ? e.message : String(e)
+                    )
+                );
+            }
         } finally {
             this.downloadingModel = false;
+            this.modelDownloadAbort = null;
             // Re-render to unlock the dropdowns and repaint the final state.
             this.display();
         }

@@ -56,13 +56,16 @@ export async function transcribeAudio(
 	onProgress?: (percent: number) => void
 ): Promise<string> {
 	const results = await backend.transcribe({
-		jobs: [{ id: "single", file, wantSegments: false }],
+		// Id "mixed" (not "single"): the backend uses job.id as the console log
+		// label, so this keeps the pre-refactor "mixed pass start (…)" logging
+		// grep-compatible.
+		jobs: [{ id: "mixed", file, wantSegments: false }],
 		signal,
 		onProgress,
 	});
 	// Select by job id rather than position: a backend's result order is not
 	// part of the contract (mirrors how the diarized path looks up me/them).
-	const result = results.find((r) => r.id === "single");
+	const result = results.find((r) => r.id === "mixed");
 	// A missing result is a backend contract violation, not an empty
 	// transcript — surface it as a failure rather than returning "" (which
 	// main.ts reads as legitimate silence and silently leaves the note alone).
