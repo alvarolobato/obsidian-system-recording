@@ -91,6 +91,12 @@ export interface SystemRecordingSettings {
 	calendarId: string;
 	exclusionKeywords: string;
 	openMeetAutomatically: boolean;
+	/**
+	 * Whether the one-time "set macOS to Alerts so notifications persist" tip has
+	 * been shown. Bookkeeping (not a user preference); set once the first meeting
+	 * notification fires so we never nag again.
+	 */
+	notificationStyleHintShown: boolean;
 	// Meeting detection (Tier 1, macOS).
 	detectMeetings: boolean;
 	detectZoom: boolean;
@@ -169,6 +175,7 @@ export const DEFAULT_SETTINGS: SystemRecordingSettings = {
 	calendarId: "primary",
 	exclusionKeywords: "",
 	openMeetAutomatically: true,
+	notificationStyleHintShown: false,
 	detectMeetings: true,
 	detectZoom: true,
 	detectGoogleMeet: false,
@@ -483,6 +490,20 @@ export class SystemRecordingSettingTab extends PluginSettingTab {
 						this.plugin.settings.openMeetAutomatically = value;
 						await this.plugin.saveSettings();
 					})
+			);
+
+		// ---- Notifications (macOS) ----
+		new Setting(containerEl)
+			.setName(s.settings.notificationsHeading)
+			.setHeading();
+
+		new Setting(containerEl)
+			.setName(s.settings.notificationStyle.name)
+			.setDesc(s.settings.notificationStyle.desc)
+			.addButton((btn) =>
+				btn
+					.setButtonText(s.settings.notificationStyle.button)
+					.onClick(() => this.plugin.openMacNotificationSettings())
 			);
 
 		// ---- Meeting detection (macOS) ----

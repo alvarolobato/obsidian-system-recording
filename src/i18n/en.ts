@@ -39,6 +39,10 @@ export const en = {
 	notices: {
 		autoRecordEnabled: "Calendar auto-recording enabled",
 		autoRecordDisabled: "Calendar auto-recording disabled",
+		// One-time tip shown the first time a meeting notification fires.
+		notificationStyleHint:
+			"Tip: if meeting prompts land only in Notification Center, it's a macOS setting — turn off Do Not Disturb / Focus and set Obsidian to “Alerts” so they pop up on screen (with a button).",
+		openNotificationSettings: "Open settings",
 		recordingError: (msg: string) => `Recording error: ${msg}`,
 		screenPermission:
 			"Recording failed: Screen Recording isn't authorized. Opening System Settings → Privacy & Security → Screen Recording — enable Obsidian there, then fully quit and reopen it. (macOS requires this for capturing system audio.)",
@@ -142,7 +146,12 @@ export const en = {
 		startingNow: "Starting now",
 		startedMinAgo: (min: number) =>
 			`Started ${min} min${min === 1 ? "" : "s"} ago`,
-		notificationHint: "click for options",
+		// Web-notification fallback only (a web banner can't render buttons, so
+		// it points the user into Obsidian). The native path omits this.
+		notificationWebHint: "Open Obsidian to choose",
+		// Body of the "meeting ended" system/in-app prompt (the action button
+		// carries the verb; this is the question).
+		stopRecordingPrompt: "Stop recording?",
 		join: "Join",
 		record: "Record",
 		joinAndRecord: "Join & record",
@@ -372,6 +381,12 @@ export const en = {
 		agendaLookBack: {
 			name: "Agenda look-back (days)",
 			desc: "How many past days you can navigate back to in the agenda (0–30).",
+		},
+		notificationsHeading: "Notifications (macOS)",
+		notificationStyle: {
+			name: "Notifications not popping up?",
+			desc: "When Obsidian is in front you get an in-app prompt; otherwise a system notification. If those system notifications land silently in Notification Center instead of on screen, it's a macOS setting (apps can't override it): turn off Do Not Disturb / Focus, set Obsidian to “Alerts” so prompts persist with a button, and — while recording or mirroring a display — enable “Allow notifications when mirroring or sharing the display”.",
+			button: "Open macOS notification settings",
 		},
 		detectionHeading: "Meeting detection (macOS)",
 		detectMeetings: {
