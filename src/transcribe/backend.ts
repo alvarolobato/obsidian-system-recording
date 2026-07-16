@@ -73,6 +73,12 @@ export interface TranscribeRequest {
 	 * jobs. The diarized orchestrator uses this to skip the second (them) pass
 	 * when the first (me) pass is a capability miss — preserving today's "don't
 	 * spend a doomed second pass" behavior. Defaults to "always continue".
+	 *
+	 * This is purely an optimization hook: a backend that runs all jobs in one
+	 * batch (e.g. a local helper that decodes both passes in a single process)
+	 * MAY ignore it. The orchestrator re-classifies every returned result after
+	 * the loop, so skipping the hook only forfeits the early-exit saving, never
+	 * correctness.
 	 */
 	continueAfterJob?: (result: JobResult) => boolean;
 }

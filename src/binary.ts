@@ -136,11 +136,16 @@ export interface AssetProvisionerDeps {
 	fileSize: (path: string) => Promise<number>;
 	/** SHA-256 (hex) of a file, streamed from disk so a 500 MB model isn't buffered. */
 	sha256File: (path: string) => Promise<string>;
-	/** Stream a URL to a destination path, reporting received/total bytes. */
+	/**
+	 * Stream a URL to a destination path, reporting received/total bytes. The
+	 * optional `signal` aborts both the request and the disk write so a stalled
+	 * connection (no idle timeout on `fetch`) can be cancelled by the caller.
+	 */
 	downloadToFile: (
 		url: string,
 		destPath: string,
-		onProgress?: (received: number, total: number) => void
+		onProgress?: (received: number, total: number) => void,
+		signal?: AbortSignal
 	) => Promise<void>;
 	rename: (from: string, to: string) => Promise<void>;
 	unlink: (path: string) => Promise<void>;
@@ -155,6 +160,8 @@ export interface EnsureAssetOptions {
 	 * so a failure is attributed to the right thing. Defaults to "model".
 	 */
 	label?: string;
+	/** Aborts an in-flight download (settings Cancel button / plugin unload). */
+	signal?: AbortSignal;
 }
 
 /**
@@ -227,9 +234,12 @@ export class AssetProvisioner {
 
 		const tmp = `${destPath}.tmp`;
 		try {
-			await this.deps.downloadToFile(url, tmp, options?.onProgress);
+			await this.deps.downloadToFile(url, tmp, options?.onProgress, options?.signal);
 		} catch (e) {
 			await this.safeUnlink(tmp);
+			// Preserve an abort as-is (name "AbortError") so callers can render a
+			// quiet "cancelled" message instead of a scary download failure.
+			if (e instanceof Error && e.name === "AbortError") throw e;
 			const reason = e instanceof Error ? e.message : String(e);
 			throw new Error(`Failed to download the ${label}: ${reason}`);
 		}

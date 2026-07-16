@@ -71,13 +71,13 @@ function throwingBackend(error: unknown): TranscriptionBackend {
 
 describe("transcribeAudio", () => {
 	it("runs one non-diarized job over the whole file and returns its text", async () => {
-		const backend = sequentialBackend({ single: { id: "single", text: "hello world" } });
+		const backend = sequentialBackend({ mixed: { id: "mixed", text: "hello world" } });
 		const file = fakeFile("a.wav");
 		const out = await transcribeAudio(file, backend);
 		expect(out).toBe("hello world");
 		const jobs = backend.lastRequest!.jobs;
 		expect(jobs).toHaveLength(1);
-		expect(jobs[0]!.id).toBe("single");
+		expect(jobs[0]!.id).toBe("mixed");
 		expect(jobs[0]!.wantSegments).toBe(false);
 		expect(jobs[0]!.speechWindows).toBeUndefined();
 		// The exact file instance passed in is forwarded to the job.
@@ -86,7 +86,7 @@ describe("transcribeAudio", () => {
 
 	it("returns empty string for a legitimately empty transcript", async () => {
 		// The fake returns a result for the job with empty text (silent audio).
-		const backend = sequentialBackend({ single: { id: "single", text: "" } });
+		const backend = sequentialBackend({ mixed: { id: "mixed", text: "" } });
 		expect(await transcribeAudio(fakeFile("a.wav"), backend)).toBe("");
 	});
 

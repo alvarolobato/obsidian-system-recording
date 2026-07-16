@@ -4,7 +4,7 @@ A Granola-style meeting workflow for Obsidian on macOS. Meeting Copilot reads yo
 
 ## Requirements
 
-- macOS 13.0+ (Apple Silicon)
+- macOS 13.3+ (Apple Silicon)
 - Obsidian Desktop
 - A Google account (for calendar integration)
 - One OpenAI-compatible endpoint (configured as a single base URL in settings) used for both transcription and enrichment. OpenAI and LiteLLM work for both. **Ollama** has no `/audio/transcriptions` endpoint, so it works for enrichment only. **Azure** requires the `/openai/v1` OpenAI-compatible surface — the classic deployment-path format won't work.

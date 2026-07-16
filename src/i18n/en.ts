@@ -396,7 +396,9 @@ export const en = {
 			downloading: (pct: number) => `Downloading… ${pct}%`,
 			download: "Download",
 			delete: "Delete",
+			cancel: "Cancel",
 			done: "Local model downloaded.",
+			cancelled: "Model download cancelled.",
 			failed: (reason: string) => `Model download failed: ${reason}`,
 		},
 		localFallback: {

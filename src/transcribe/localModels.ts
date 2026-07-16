@@ -68,7 +68,14 @@ export const DEFAULT_LOCAL_MODEL_ID = "large-v3-turbo-q5_0";
 
 /** Resolve a model id to its spec, falling back to the default for an unknown id. */
 export function localModelSpec(id: string): LocalModelSpec {
-	return LOCAL_MODELS[id] ?? LOCAL_MODELS[DEFAULT_LOCAL_MODEL_ID]!;
+	// Own-property check, not `LOCAL_MODELS[id] ?? …`: a prototype key like
+	// "constructor" would otherwise resolve to Object.prototype.constructor
+	// (truthy), so the `??` fallback never fires and a Function leaks out as a
+	// "spec". Guard with hasOwnProperty so any non-registry id maps to default.
+	if (Object.prototype.hasOwnProperty.call(LOCAL_MODELS, id)) {
+		return LOCAL_MODELS[id]!;
+	}
+	return LOCAL_MODELS[DEFAULT_LOCAL_MODEL_ID]!;
 }
 
 /**
