@@ -124,4 +124,18 @@ describe("migrateSettings", () => {
 		const migrated = migrateSettings({ oneOffFolderTemplate: "Meetings" });
 		expect(migrated).not.toHaveProperty("enrichPrompt");
 	});
+
+	it("coerces a present-but-non-string enrichPrompt to the default", () => {
+		for (const bad of [null, 42, {}, [], true]) {
+			const migrated = migrateSettings({
+				oneOffFolderTemplate: "Meetings",
+				enrichPrompt: bad as unknown as string,
+			});
+			// A corrupt value must not survive to override DEFAULT_ENRICH_PROMPT.
+			expect(migrated.enrichPrompt).toBe(DEFAULT_ENRICH_PROMPT);
+			expect(
+				Object.assign({}, DEFAULT_SETTINGS, migrated).enrichPrompt
+			).toBe(DEFAULT_ENRICH_PROMPT);
+		}
+	});
 });

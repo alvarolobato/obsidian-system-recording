@@ -293,9 +293,17 @@ export function migrateSettings(
 				})();
 	// Upgrade an untouched default enrichment prompt so an existing vault (which
 	// persisted a full copy of the prompt) picks up newer placeholders like
-	// `{{actionItems}}`. A customized prompt is left as-is.
-	if (typeof migrated.enrichPrompt === "string") {
-		migrated.enrichPrompt = upgradeEnrichPrompt(migrated.enrichPrompt);
+	// `{{actionItems}}`; a customized prompt is left as-is. A present-but-non-string
+	// value (hand-edited/corrupt data.json, e.g. `enrichPrompt: null`) is coerced
+	// to the current default so it can't override DEFAULT_ENRICH_PROMPT and break
+	// enrichment — matching sanitizeMigrated's "drop bad types" contract. An absent
+	// key is left untouched so DEFAULT_SETTINGS supplies it.
+	if ("enrichPrompt" in migrated) {
+		migrated.enrichPrompt = upgradeEnrichPrompt(
+			typeof migrated.enrichPrompt === "string"
+				? migrated.enrichPrompt
+				: undefined
+		);
 	}
 	return migrated;
 }
