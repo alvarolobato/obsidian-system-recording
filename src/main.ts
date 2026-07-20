@@ -41,6 +41,7 @@ import { GoogleOAuth, type StoredTokens } from "./auth/googleOAuth";
 import { listEvents } from "./calendar/googleCalendar";
 import { parseKeywords } from "./calendar/eventFilter";
 import { CalendarScheduler, GRACE_MS, ScheduledEvent } from "./calendar/scheduler";
+import { eventEndStopAction } from "./calendar/eventEnd";
 import { actionNotice, multiActionNotice, NoticeAction } from "./ui/actionNotice";
 import {
     ADHOC_ID_PREFIX,
@@ -1981,28 +1982,36 @@ export default class SystemRecordingPlugin extends Plugin {
 			keepOs: true,
 		});
 
-		// Only act when *this* meeting's recording is the active one, so
-		// overlapping meetings can't stop the wrong recording (or prompt when
-		// nothing is being recorded).
-		if (
-			!this.recorder.isRecording ||
-			this.currentRecordingEventId !== event.id
-		) {
-			return;
+		// Decide what to do with an active recording at the scheduled end. Only
+		// acts on *this* meeting's recording (so overlapping meetings can't stop
+		// the wrong one). Auto-stop is honored as before; otherwise the "stop?"
+		// suggestion is deferred while a conferencing app is still in a meeting
+		// (the event ran over) — the detector will offer to stop when the real
+		// meeting ends. `detectedOngoing` is null when detection can't answer,
+		// which falls back to prompting at the boundary as before.
+		const action = eventEndStopAction({
+			isRecording: this.recorder.isRecording,
+			isThisEventsRecording: this.currentRecordingEventId === event.id,
+			autoStop: this.settings.calendarAutoStop,
+			detectedOngoing: this.detector
+				? this.detector.activeCount()
+				: null,
+		});
+		switch (action) {
+			case "auto-stop":
+				new Notice(t().event.autoStopped(event.summary));
+				this.stopRecording();
+				break;
+			case "prompt-stop":
+				this.promptStopRecording(
+					t().event.ended(event.summary),
+					t().event.stopRecordingPrompt
+				);
+				break;
+			case "defer":
+			case "none":
+				break;
 		}
-
-		// A recording never stops on its own — offer to stop — *unless* the user
-		// opted into calendar auto-stop, in which case the meeting's own end (even
-		// one crossed late after a wake) stops it.
-		if (this.settings.calendarAutoStop) {
-			new Notice(t().event.autoStopped(event.summary));
-			this.stopRecording();
-			return;
-		}
-		this.promptStopRecording(
-			t().event.ended(event.summary),
-			t().event.stopRecordingPrompt
-		);
 	}
 
     // MARK: - Meeting agenda
