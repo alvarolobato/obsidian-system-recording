@@ -16,11 +16,19 @@ import AudioToolbox
 ///     so macOS doesn't show the screen-recording indicator or suppress the
 ///     user's notifications for the duration of a meeting (taps are audio-only).
 ///     It does need the **System Audio Recording** grant (see below).
-///   * **Device-independent.** A global tap observes every process's output
-///     stream regardless of the current output *hardware* device, so the classic
-///     "Zoom launched after we started, switched the default device, and system
-///     audio went silent" failure the SCK path must actively recover from
-///     doesn't arise.
+///   * **Observes every process's output** regardless of which one is playing,
+///     via a single global tap.
+///
+/// ## Hosting the aggregate on the real output device
+/// The aggregate is hosted on the **current default output device** (as its main
+/// sub-device / clock master), not left as a free-floating tap-only aggregate.
+/// A tap-only aggregate makes coreaudiod serialize *other* apps' audio
+/// initialization against ours — which blocked conferencing apps (Zoom/Meet)
+/// from joining audio until the recording stopped. Hosting on real hardware
+/// (the shape AudioCap and Apple's guidance use) avoids that. The tap itself is
+/// still global, so what we capture is unchanged; only the clock host differs.
+/// A default-output change is watched (`installHealthListeners`) and triggers a
+/// rebuild so the aggregate re-hosts on the new device.
 ///
 /// ## Silence and the IO clock
 /// A global process tap only produces IO cycles **while some process is playing
@@ -136,7 +144,10 @@ final class SystemAudioProcessTap: @unchecked Sendable {
             // aggregate's sub-tap list (Apple's sample reads it back), falling
             // back to the UUID we set if the property read fails.
             let tapUID = Self.readTapUID(tapID) ?? description.uuid.uuidString
-            aggregateID = try Self.createAggregateDevice(tappingUID: tapUID)
+            aggregateID = try Self.createAggregateDevice(
+                tappingUID: tapUID,
+                outputUID: Self.defaultOutputDeviceUID()
+            )
             try startIOProc(format: format)
             installHealthListeners()
         } catch {
@@ -341,6 +352,14 @@ final class SystemAudioProcessTap: @unchecked Sendable {
         addListener(tapID, kAudioTapPropertyFormat) { [weak self] in
             self?.onNeedsRestart?()
         }
+        // We now host the aggregate on the current default output device, so a
+        // default-output switch (headphones in/out, an app moving audio to its
+        // own device) must rebuild the aggregate around the new device —
+        // otherwise its clock host is stale. Cheap and edge-triggered, and the
+        // rebuild is bounded by the shared restart budget.
+        addListener(AudioObjectID(kAudioObjectSystemObject), kAudioHardwarePropertyDefaultOutputDevice) {
+            [weak self] in self?.onNeedsRestart?()
+        }
     }
 
     private func addListener(
@@ -455,19 +474,26 @@ final class SystemAudioProcessTap: @unchecked Sendable {
         return cf.takeRetainedValue() as String
     }
 
-    /// A private, auto-starting aggregate device whose only member is the given
-    /// tap. Private so it isn't published to other apps; auto-start so it begins
-    /// clocking as soon as the IO proc runs.
-    private static func createAggregateDevice(tappingUID tapUID: String) throws -> AudioObjectID {
-        let description: [String: Any] = [
+    /// A private, auto-starting aggregate device that hosts the given tap on the
+    /// current default output device (`outputUID`) as its clock master. Private
+    /// so it isn't published to other apps; auto-start so it begins clocking as
+    /// soon as the IO proc runs. Hosting on a real output device — rather than a
+    /// free-floating tap-only aggregate — is what keeps coreaudiod from blocking
+    /// other apps' (Zoom/Meet) audio init against ours; when the output device
+    /// can't be resolved we fall back to the tap-only shape (capture still works,
+    /// it just risks the contention this fix addresses).
+    private static func createAggregateDevice(
+        tappingUID tapUID: String,
+        outputUID: String?
+    ) throws -> AudioObjectID {
+        var description: [String: Any] = [
             kAudioAggregateDeviceNameKey: "Meeting Copilot Aggregate",
             kAudioAggregateDeviceUIDKey: "com.meetingcopilot.aggregate-\(UUID().uuidString)",
             kAudioAggregateDeviceIsPrivateKey: true,
             kAudioAggregateDeviceIsStackedKey: false,
-            // Auto-start is the HAL default for a tap-only aggregate, but set it
+            // Auto-start is the HAL default for a tap aggregate, but set it
             // explicitly so the intent is clear and independent of that default.
             kAudioAggregateDeviceTapAutoStartKey: true,
-            kAudioAggregateDeviceSubDeviceListKey: [[String: Any]](),
             kAudioAggregateDeviceTapListKey: [
                 [
                     kAudioSubTapDriftCompensationKey: true,
@@ -475,12 +501,53 @@ final class SystemAudioProcessTap: @unchecked Sendable {
                 ]
             ],
         ]
+        if let outputUID {
+            // Real hardware as the clock master + sole audio sub-device, with the
+            // tap drift-compensated against it. This is the AudioCap / Apple
+            // sample shape.
+            description[kAudioAggregateDeviceMainSubDeviceKey] = outputUID
+            description[kAudioAggregateDeviceSubDeviceListKey] = [
+                [kAudioSubDeviceUIDKey: outputUID]
+            ]
+        } else {
+            description[kAudioAggregateDeviceSubDeviceListKey] = [[String: Any]]()
+        }
         var aggregateID = AudioObjectID(kAudioObjectUnknown)
         let status = AudioHardwareCreateAggregateDevice(description as CFDictionary, &aggregateID)
         guard status == noErr, aggregateID != AudioObjectID(kAudioObjectUnknown) else {
             throw TapError.createAggregate(status)
         }
         return aggregateID
+    }
+
+    /// UID of the current default output device (the aggregate's clock host), or
+    /// nil if it can't be resolved (the caller then builds a tap-only aggregate).
+    private static func defaultOutputDeviceUID() -> String? {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDefaultOutputDevice,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var deviceID = AudioObjectID(kAudioObjectUnknown)
+        var size = UInt32(MemoryLayout<AudioObjectID>.size)
+        let status = AudioObjectGetPropertyData(
+            AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &size, &deviceID
+        )
+        guard status == noErr, deviceID != AudioObjectID(kAudioObjectUnknown) else {
+            return nil
+        }
+        var uidAddress = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyDeviceUID,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var uidSize = UInt32(MemoryLayout<CFString?>.size)
+        var value: Unmanaged<CFString>?
+        let uidStatus = AudioObjectGetPropertyData(
+            deviceID, &uidAddress, 0, nil, &uidSize, &value
+        )
+        guard uidStatus == noErr, let cf = value else { return nil }
+        return cf.takeRetainedValue() as String
     }
 
     /// Resolve this process's Core Audio process-object id (for the tap's
