@@ -77,6 +77,7 @@ export interface MockRequestResponse {
 	status: number;
 	json?: unknown;
 	text?: string;
+	arrayBuffer?: ArrayBuffer;
 }
 type RequestUrlImpl = (opts: {
 	url: string;

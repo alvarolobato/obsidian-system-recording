@@ -2,7 +2,14 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import * as os from "os";
 import * as path from "path";
 import * as fs from "fs/promises";
-import { assetNodeDeps } from "./binary-runtime";
+import {
+	assetNodeDeps,
+	isCorslessReleaseHost,
+	requestUrlToFile,
+} from "./binary-runtime";
+// `obsidian` is aliased to test/obsidian-mock.ts at runtime; import the test
+// hook from the mock directly (the real `obsidian` types don't export it).
+import { __setRequestUrl } from "../test/obsidian-mock";
 
 // The streaming download is the highest-risk piece of the model provisioner
 // (backpressure, HTTP handling, body cleanup), so exercise it against a mocked
@@ -184,5 +191,132 @@ describe("assetNodeDeps().downloadToFile", () => {
 		expect(cancelled).toBe(true);
 		// Nothing should have been written for a rejected response.
 		await expect(fs.readFile(dest)).rejects.toBeTruthy();
+	});
+});
+
+describe("isCorslessReleaseHost", () => {
+	it("is true for GitHub release URLs (no CORS on the asset CDN)", () => {
+		expect(
+			isCorslessReleaseHost(
+				"https://github.com/owner/repo/releases/download/0.4.3/whisper"
+			)
+		).toBe(true);
+	});
+
+	it("is true for *.githubusercontent.com (the redirect target)", () => {
+		expect(
+			isCorslessReleaseHost(
+				"https://release-assets.githubusercontent.com/x/y"
+			)
+		).toBe(true);
+		expect(
+			isCorslessReleaseHost("https://objects.githubusercontent.com/z")
+		).toBe(true);
+	});
+
+	it("is false for Hugging Face (serves CORS, streamed via fetch)", () => {
+		expect(
+			isCorslessReleaseHost(
+				"https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small-q5_1.bin"
+			)
+		).toBe(false);
+	});
+
+	it("is false for a non-github lookalike host", () => {
+		// endsWith guards against a spoof like `evilgithubusercontent.com`.
+		expect(isCorslessReleaseHost("https://notgithub.com/x")).toBe(false);
+		expect(
+			isCorslessReleaseHost("https://evilgithubusercontent.com/x")
+		).toBe(false);
+	});
+
+	it("is false for an unparseable URL", () => {
+		expect(isCorslessReleaseHost("not a url")).toBe(false);
+		expect(isCorslessReleaseHost("")).toBe(false);
+	});
+});
+
+describe("requestUrlToFile (GitHub assets, CORS-exempt via requestUrl)", () => {
+	const tmpDirs: string[] = [];
+
+	afterEach(async () => {
+		__setRequestUrl(() => ({ status: 200, json: {}, text: "" }));
+		await Promise.all(
+			tmpDirs.splice(0).map((d) => fs.rm(d, { recursive: true, force: true }))
+		);
+	});
+
+	async function freshDest(): Promise<string> {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "mc-dylib-"));
+		tmpDirs.push(dir);
+		// Nested to prove mkdir -p of the whisper.framework layout.
+		return path.join(
+			dir,
+			"whisper.framework",
+			"Versions",
+			"Current",
+			"whisper"
+		);
+	}
+
+	it("writes the fetched bytes to a nested destination and reports progress", async () => {
+		const payload = new TextEncoder().encode("dylib-bytes");
+		__setRequestUrl(() => ({ status: 200, arrayBuffer: payload.buffer }));
+		const dest = await freshDest();
+		const progress: Array<[number, number]> = [];
+
+		await requestUrlToFile(
+			"https://github.com/o/r/releases/download/1/whisper",
+			dest,
+			(r, t) => progress.push([r, t])
+		);
+
+		expect(await fs.readFile(dest, "utf8")).toBe("dylib-bytes");
+		expect(progress).toEqual([[payload.byteLength, payload.byteLength]]);
+	});
+
+	it("throws HTTP <status> on a non-2xx response", async () => {
+		__setRequestUrl(() => ({ status: 404, text: "nope" }));
+		const dest = await freshDest();
+		await expect(
+			requestUrlToFile(
+				"https://github.com/o/r/releases/download/1/whisper",
+				dest
+			)
+		).rejects.toThrow("HTTP 404");
+		// Nothing written for a rejected response (throws before writeFile).
+		await expect(fs.readFile(dest)).rejects.toBeTruthy();
+	});
+
+	it("routes GitHub URLs through requestUrl (never fetch) end-to-end", async () => {
+		const payload = new TextEncoder().encode("gh-bytes");
+		__setRequestUrl(() => ({ status: 200, arrayBuffer: payload.buffer }));
+		const fetchSpy = vi.fn(async () => {
+			throw new Error("fetch must not be called for GitHub assets");
+		});
+		vi.stubGlobal("fetch", fetchSpy);
+		const dest = await freshDest();
+
+		await assetNodeDeps().downloadToFile(
+			"https://github.com/o/r/releases/download/1/whisper",
+			dest
+		);
+
+		expect(await fs.readFile(dest, "utf8")).toBe("gh-bytes");
+		expect(fetchSpy).not.toHaveBeenCalled();
+	});
+
+	it("rejects with an AbortError when the signal is already aborted", async () => {
+		const ac = new AbortController();
+		ac.abort();
+		const dest = await freshDest();
+		await expect(
+			requestUrlToFile(
+				"https://github.com/o/r/releases/download/1/whisper",
+				dest,
+				undefined,
+				ac.signal
+			)
+		).rejects.toHaveProperty("name", "AbortError");
 	});
 });
