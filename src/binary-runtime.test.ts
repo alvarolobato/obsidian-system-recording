@@ -284,6 +284,26 @@ describe("requestUrlToFile (GitHub assets, CORS-exempt via requestUrl)", () => {
 				dest
 			)
 		).rejects.toThrow("HTTP 404");
+		// Nothing written for a rejected response (throws before writeFile).
+		await expect(fs.readFile(dest)).rejects.toBeTruthy();
+	});
+
+	it("routes GitHub URLs through requestUrl (never fetch) end-to-end", async () => {
+		const payload = new TextEncoder().encode("gh-bytes");
+		__setRequestUrl(() => ({ status: 200, arrayBuffer: payload.buffer }));
+		const fetchSpy = vi.fn(async () => {
+			throw new Error("fetch must not be called for GitHub assets");
+		});
+		vi.stubGlobal("fetch", fetchSpy);
+		const dest = await freshDest();
+
+		await assetNodeDeps().downloadToFile(
+			"https://github.com/o/r/releases/download/1/whisper",
+			dest
+		);
+
+		expect(await fs.readFile(dest, "utf8")).toBe("gh-bytes");
+		expect(fetchSpy).not.toHaveBeenCalled();
 	});
 
 	it("rejects with an AbortError when the signal is already aborted", async () => {

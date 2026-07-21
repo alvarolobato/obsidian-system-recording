@@ -78,11 +78,6 @@ export function resolveWhisperDylibPath(plugin: Plugin): string {
 }
 
 /**
- * Streaming I/O for {@link AssetProvisioner}: models are hundreds of MB, so the
- * download goes straight to disk and the hash is computed from the file rather
- * than buffering the whole thing in renderer memory.
- */
-/**
  * True for hosts where the download ultimately serves from GitHub's release-asset
  * CDN (`release-assets.githubusercontent.com`), which sends **no** CORS headers.
  * A renderer `fetch` to such a URL is blocked with `TypeError: Failed to fetch`,
@@ -122,7 +117,8 @@ export async function requestUrlToFile(
 	signal?: AbortSignal
 ): Promise<void> {
 	if (signal?.aborted) throw abortError();
-	// requestUrl follows redirects; res.status is the final response code.
+	// requestUrl follows redirects; res.status is the final response code. Accept
+	// any 2xx to mirror the streaming path's `res.ok` check (GitHub returns 200).
 	const res = await requestUrl({ url, method: "GET", throw: false });
 	if (res.status < 200 || res.status >= 300) {
 		throw new Error(`HTTP ${res.status}`);
@@ -195,6 +191,11 @@ async function streamFetchToFile(
 	await pipeline(body, fs.createWriteStream(destPath), { signal });
 }
 
+/**
+ * Streaming I/O for {@link AssetProvisioner}: models are hundreds of MB, so the
+ * download goes straight to disk and the hash is computed from the file rather
+ * than buffering the whole thing in renderer memory.
+ */
 export function assetNodeDeps(): AssetProvisionerDeps {
 	return {
 		fileExists: async (p) => {
