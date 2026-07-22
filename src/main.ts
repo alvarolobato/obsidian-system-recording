@@ -219,6 +219,15 @@ type TranscribeTakeResult =
     | { kind: "partial" }
     | { kind: "error"; message: string };
 
+/**
+ * Cap on how long the diarized pass waits for the (optional, ~20 KB) fvad.wasm
+ * fetch before proceeding with the RMS fallback. The download is normally
+ * sub-second (and a no-op once present), but `requestUrl` can't be aborted
+ * mid-flight, so a stalled connection must not hang transcription — after this
+ * it continues in the background for the next run.
+ */
+const FVAD_PROVISION_TIMEOUT_MS = 15_000;
+
 export default class SystemRecordingPlugin extends Plugin {
     settings: SystemRecordingSettings;
     private recorder = new Recorder();
@@ -3454,6 +3463,35 @@ export default class SystemRecordingPlugin extends Plugin {
     }
 
     /**
+     * Provision fvad.wasm without ever stalling or failing the caller. A failed
+     * fetch is logged at debug (VAD degrades to the RMS windows); a *slow* fetch
+     * is time-boxed — `requestUrl` can't be aborted mid-flight, so on the cap we
+     * proceed with the RMS fallback and let the download finish in the
+     * background (its rejection is swallowed) so the next run finds it. Resolves
+     * (never rejects) once the asset is present or the cap elapses.
+     */
+    private async ensureFvadWasmBestEffort(): Promise<void> {
+        const provision = this.ensureFvadWasm().then(
+            () => undefined,
+            (e: unknown) => {
+                console.debug(
+                    "[Meeting Copilot][vad] fvad.wasm unavailable; using RMS fallback",
+                    e
+                );
+            }
+        );
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const cap = new Promise<void>((resolve) => {
+            timer = setTimeout(resolve, FVAD_PROVISION_TIMEOUT_MS);
+        });
+        try {
+            await Promise.race([provision, cap]);
+        } finally {
+            if (timer) clearTimeout(timer);
+        }
+    }
+
+    /**
      * The on-device Whisper backend, provisioning everything it needs on first
      * use: the recorder helper runtime (binary + linked framework) and the
      * selected ggml model. Each ensure is a no-op once present, so steady-state
@@ -3530,16 +3568,10 @@ export default class SystemRecordingPlugin extends Plugin {
         // stream (and to no filtering when neither is available).
         //
         // Make sure fvad.wasm is present first (BRAT installs don't ship it);
-        // best-effort — a failed fetch just means computeSpeechWindows falls
-        // back to the RMS gate, so never let it break the transcription.
-        try {
-            await this.ensureFvadWasm();
-        } catch (e) {
-            console.debug(
-                "[Meeting Copilot][vad] fvad.wasm unavailable; using RMS fallback",
-                e
-            );
-        }
+        // best-effort and time-boxed — a failed OR slow fetch just means
+        // computeSpeechWindows falls back to the RMS gate, so it must never
+        // stall or break the transcription.
+        await this.ensureFvadWasmBestEffort();
         const localWindows = await computeSpeechWindows(this.app, meFile, themFile);
         let rmsWindows: SpeechWindows | undefined;
         const speech = await this.resolveExistingFile(sidecars.speech);
