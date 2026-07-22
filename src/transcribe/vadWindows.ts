@@ -98,6 +98,31 @@ export async function decodeMono16k(
 	}
 }
 
+/**
+ * Whether `fvad.wasm` is present in any location the loader searches. Checked up
+ * front so a missing binary — a BRAT/community install before (or without) the
+ * on-demand fetch, an offline first run — skips VAD *cleanly* instead of letting
+ * the vendored processor throw and log two scary ERRORs on every diarized pass.
+ * Missing is an expected, benign fallback (to the recorder's RMS windows), not a
+ * failure worth surfacing.
+ */
+async function fvadWasmAvailable(app: App): Promise<boolean> {
+	let paths: string[];
+	try {
+		paths = PathUtils.getWasmFilePaths(app, "fvad.wasm");
+	} catch {
+		return false;
+	}
+	for (const p of paths) {
+		try {
+			if (await app.vault.adapter.exists(p)) return true;
+		} catch {
+			// unreadable candidate — keep checking the rest
+		}
+	}
+	return false;
+}
+
 /** Run VAD over one stream and return its speech windows as [start, end] seconds. */
 async function windowsForFile(app: App, file: TFile): Promise<Array<[number, number]>> {
 	const { audioData, sampleRate } = await decodeMono16k(app, file);
@@ -122,6 +147,15 @@ export async function computeSpeechWindows(
 	themFile: TFile
 ): Promise<SpeechWindows | undefined> {
 	try {
+		// Skip cleanly when fvad.wasm isn't present (e.g. a BRAT install whose
+		// on-demand fetch hasn't landed) so the vendored loader doesn't throw +
+		// log ERRORs; the caller falls back to the recorder's RMS windows.
+		if (!(await fvadWasmAvailable(app))) {
+			console.debug(
+				"[Meeting Copilot][vad] fvad.wasm not found; using recorder RMS windows"
+			);
+			return undefined;
+		}
 		// Serialize the two passes: each briefly holds the whole stream in RAM,
 		// and they share the single vendored fvad module state.
 		const me = await windowsForFile(app, meFile);

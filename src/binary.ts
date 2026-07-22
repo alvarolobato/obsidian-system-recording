@@ -35,6 +35,35 @@ export function whisperDylibUrl(version: string): string {
 	return `https://github.com/${REPO}/releases/download/${version}/whisper`;
 }
 
+/**
+ * SHA-256 (hex) and byte size of `fvad.wasm` — the WebRTC-VAD module the diarized
+ * path uses to compute per-stream speech windows (the hallucination filter; see
+ * `src/transcribe/vadWindows.ts`). Used by the provisioner to fetch it on demand
+ * for installs that don't ship it next to `main.js`.
+ *
+ * Unlike {@link EXPECTED_WHISPER_SHA256} (a per-release built+signed artifact),
+ * `fvad.wasm` is an **immutable npm artifact** vendored from
+ * `@echogarden/fvad-wasm` — the same bytes in every build and in every release
+ * asset — so these values are pinned here **once** and are NOT re-pinned per
+ * release. `src/binary.test.ts` guards them against a dependency bump by hashing
+ * the file in `node_modules`.
+ *
+ * Why this download exists: BRAT (the recommended install) only fetches
+ * `main.js` / `manifest.json` / `styles.css`, so a BRAT/community install has no
+ * `fvad.wasm`. Without it the diarized VAD silently falls back to the recorder's
+ * coarse RMS gate (more Whisper hallucinations) and logs errors. Provisioning it
+ * on demand — exactly like the recorder binary and whisper dylib — closes that
+ * gap. A local `deploy:local` build copies the file in, so this is a no-op there.
+ */
+export const EXPECTED_FVAD_SHA256 =
+	"f81d42b107a2198a3aa0f8ae4f27a8b7a2cc4218896adae5ff82012178eff727";
+export const FVAD_WASM_SIZE = 20569;
+
+/** GitHub release asset URL for `fvad.wasm` of the given plugin version. */
+export function fvadWasmUrl(version: string): string {
+	return `https://github.com/${REPO}/releases/download/${version}/fvad.wasm`;
+}
+
 /** Injected I/O so the provisioner is unit-testable with no real fs/network. */
 export interface ProvisionerDeps {
 	arch: () => string;

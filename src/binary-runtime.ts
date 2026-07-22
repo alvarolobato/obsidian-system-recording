@@ -45,6 +45,17 @@ export function resolveBinaryPath(plugin: Plugin): string {
 	return path.join(basePath, plugin.manifest.dir ?? "", "system-recorder");
 }
 
+/**
+ * Absolute path to `fvad.wasm` next to `main.js`, where the vendored VAD loader
+ * reads it from (`<pluginDir>/fvad.wasm`). Provisioned on demand for installs
+ * (e.g. BRAT) that don't ship it alongside the bundle.
+ */
+export function resolveFvadWasmPath(plugin: Plugin): string {
+	const adapter = plugin.app.vault.adapter;
+	const basePath = adapter instanceof FileSystemAdapter ? adapter.getBasePath() : "";
+	return path.join(basePath, plugin.manifest.dir ?? "", "fvad.wasm");
+}
+
 /** Absolute path to the plugin's local-model directory (created on demand). */
 export function resolveModelDir(plugin: Plugin): string {
 	const adapter = plugin.app.vault.adapter;

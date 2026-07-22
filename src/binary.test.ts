@@ -1,7 +1,14 @@
+import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+
 import { describe, it, expect, vi } from "vitest";
 import {
 	BinaryProvisioner,
+	EXPECTED_FVAD_SHA256,
 	EXPECTED_WHISPER_SHA256,
+	FVAD_WASM_SIZE,
+	fvadWasmUrl,
 	ProvisionerDeps,
 	releaseUrl,
 	WHISPER_DYLIB_SIZE,
@@ -142,6 +149,39 @@ describe("whisper dylib provisioning contract", () => {
 	it("targets the per-version release asset named 'whisper'", () => {
 		expect(whisperDylibUrl("1.2.3")).toBe(
 			"https://github.com/alvarolobato/obsidian-meeting-copilot/releases/download/1.2.3/whisper"
+		);
+	});
+});
+
+describe("fvad.wasm provisioning contract", () => {
+	it("pins a 64-char hex SHA-256 and a positive byte size", () => {
+		expect(EXPECTED_FVAD_SHA256).toMatch(/^[0-9a-f]{64}$/);
+		expect(Number.isInteger(FVAD_WASM_SIZE)).toBe(true);
+		expect(FVAD_WASM_SIZE).toBeGreaterThan(0);
+	});
+
+	it("targets the per-version release asset named 'fvad.wasm'", () => {
+		expect(fvadWasmUrl("1.2.3")).toBe(
+			"https://github.com/alvarolobato/obsidian-meeting-copilot/releases/download/1.2.3/fvad.wasm"
+		);
+	});
+
+	// Drift guard: fvad.wasm is an immutable npm artifact (@echogarden/fvad-wasm)
+	// copied verbatim into the release, so — unlike the built+signed whisper
+	// dylib — its SHA/size are pinned once here, not re-pinned per release. If a
+	// dependency bump changes the bytes, this fails so the pins get updated
+	// (otherwise the on-demand fetch would reject the new file as unverified).
+	it("matches the fvad.wasm shipped in node_modules", () => {
+		const fvadPath = fileURLToPath(
+			new URL(
+				"../node_modules/@echogarden/fvad-wasm/fvad.wasm",
+				import.meta.url
+			)
+		);
+		const bytes = readFileSync(fvadPath);
+		expect(bytes.length).toBe(FVAD_WASM_SIZE);
+		expect(createHash("sha256").update(bytes).digest("hex")).toBe(
+			EXPECTED_FVAD_SHA256
 		);
 	});
 });

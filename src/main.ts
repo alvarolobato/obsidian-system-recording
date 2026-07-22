@@ -18,16 +18,21 @@ import {
 import {
     AssetProvisioner,
     BinaryProvisioner,
+    EXPECTED_FVAD_SHA256,
     EXPECTED_WHISPER_SHA256,
+    FVAD_WASM_SIZE,
+    fvadWasmUrl,
     WHISPER_DYLIB_SIZE,
     whisperDylibUrl,
 } from "./binary";
 import { describeVersion } from "./buildInfo";
 import { awaitIndexedFile } from "./util/awaitIndexedFile";
+import { findByPathCaseInsensitive } from "./util/caseInsensitivePath";
 import {
     assetNodeDeps,
     nodeDeps,
     resolveBinaryPath,
+    resolveFvadWasmPath,
     resolveModelPath,
     resolveWhisperDylibPath,
     whisperCppNodeDeps,
@@ -3425,6 +3430,30 @@ export default class SystemRecordingPlugin extends Plugin {
     }
 
     /**
+     * Ensures `fvad.wasm` sits next to `main.js` so the diarized path can run
+     * local WebRTC VAD (the hallucination filter). BRAT/community installs only
+     * ship main.js/manifest/styles, so the file is otherwise absent — unlike a
+     * `deploy:local` build, which copies it in. Byte-identical across releases
+     * (immutable npm artifact), so the fixed SHA/size + the provisioner's size
+     * fast-path make it a one-time fetch reused thereafter.
+     *
+     * **Best-effort**: local VAD is optional (it degrades to the recorder's RMS
+     * windows), so a failed fetch (offline, older release without the asset)
+     * must not break transcription. The caller swallows the rejection; we only
+     * log at debug. Never shows a download Notice — it's a silent background
+     * top-up, not a user-facing prerequisite like the model/helper.
+     */
+    private ensureFvadWasm(): Promise<string> {
+        return this.modelProvisioner.ensure(
+            resolveFvadWasmPath(this),
+            fvadWasmUrl(this.manifest.version),
+            EXPECTED_FVAD_SHA256,
+            FVAD_WASM_SIZE,
+            { label: "voice-activity detector" }
+        );
+    }
+
+    /**
      * The on-device Whisper backend, provisioning everything it needs on first
      * use: the recorder helper runtime (binary + linked framework) and the
      * selected ggml model. Each ensure is a no-op once present, so steady-state
@@ -3499,6 +3528,18 @@ export default class SystemRecordingPlugin extends Plugin {
         // the recorder's crude RMS gate, but merge per stream: if VAD found no
         // speech on a stream, fall back to the recorder's speech.json for that
         // stream (and to no filtering when neither is available).
+        //
+        // Make sure fvad.wasm is present first (BRAT installs don't ship it);
+        // best-effort — a failed fetch just means computeSpeechWindows falls
+        // back to the RMS gate, so never let it break the transcription.
+        try {
+            await this.ensureFvadWasm();
+        } catch (e) {
+            console.debug(
+                "[Meeting Copilot][vad] fvad.wasm unavailable; using RMS fallback",
+                e
+            );
+        }
         const localWindows = await computeSpeechWindows(this.app, meFile, themFile);
         let rmsWindows: SpeechWindows | undefined;
         const speech = await this.resolveExistingFile(sidecars.speech);
@@ -5635,7 +5676,20 @@ export default class SystemRecordingPlugin extends Plugin {
             {
                 getIndexed: (p) => {
                     const f = this.app.vault.getAbstractFileByPath(p);
-                    return f instanceof TFile ? f : null;
+                    if (f instanceof TFile) return f;
+                    // Case-insensitive fallback: on a case-insensitive FS the
+                    // recorder writes to the settings-cased path (e.g.
+                    // "Meetings/…") but Obsidian may index the folder under a
+                    // different case ("meetings/…"), so the exact, case-SENSITIVE
+                    // lookup misses even though the file is indexed — and
+                    // existsOnDisk (also case-insensitive) then keeps us waiting
+                    // the full cap for a file that's already there. Mirror the
+                    // manual path's tolerance (getFirstLinkpathDest is
+                    // case-insensitive) so auto-transcribe resolves it too.
+                    return findByPathCaseInsensitive(
+                        this.app.vault.getFiles(),
+                        p
+                    );
                 },
                 existsOnDisk: (p) => this.app.vault.adapter.exists(p),
                 onCreate: (cb) => {
