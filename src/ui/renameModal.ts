@@ -8,6 +8,12 @@ export interface RenameModalOptions {
 	keepLabel: string;
 	/** Called with the trimmed value when the user confirms the rename. */
 	onRename: (value: string) => void;
+	/**
+	 * Called when the user explicitly chooses Rename or Keep (not Esc /
+	 * click-away), so the caller can mark the offer as settled while still
+	 * allowing retry after a dismiss-without-action.
+	 */
+	onDecide?: () => void;
 }
 
 /**
@@ -16,6 +22,7 @@ export interface RenameModalOptions {
  */
 export class RenameModal extends Modal {
 	private input!: TextComponent;
+	private decided = false;
 
 	constructor(
 		app: App,
@@ -50,7 +57,7 @@ export class RenameModal extends Modal {
 					.onClick(() => this.submit())
 			)
 			.addButton((b) =>
-				b.setButtonText(this.opts.keepLabel).onClick(() => this.close())
+				b.setButtonText(this.opts.keepLabel).onClick(() => this.keep())
 			);
 
 		// Focus + select so the user can type over the suggestion immediately.
@@ -60,8 +67,20 @@ export class RenameModal extends Modal {
 		}, 0);
 	}
 
+	private decide(): void {
+		if (this.decided) return;
+		this.decided = true;
+		this.opts.onDecide?.();
+	}
+
+	private keep(): void {
+		this.decide();
+		this.close();
+	}
+
 	private submit(): void {
 		const value = this.input.getValue().trim();
+		this.decide();
 		this.close();
 		if (value) this.opts.onRename(value);
 	}

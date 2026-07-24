@@ -336,11 +336,12 @@ export default class SystemRecordingPlugin extends Plugin {
 	/** Resolvers waiting for the current recording to fully stop (back-to-back chaining). */
 	private stopWaiters: Array<() => void> = [];
 	/**
-	 * True while a back-to-back `replaceCurrent` stop→start is in flight. Suppresses
-	 * new stop prompts so a calendar/detector end during the handoff can't kill
-	 * the recording that is about to (or just did) start.
+	 * Nested count of in-flight `replaceCurrent` handoffs. Suppresses stop
+	 * prompts while > 0. A refcount (not a boolean) so a concurrent
+	 * startRecording that early-returns can't clear suppression for another
+	 * handoff still in stopAndWait/provision/spawn.
 	 */
-	private replacingRecording = false;
+	private replacingDepth = 0;
 	/** True while a stopped recording is still being linked/handled in attachRecording. */
 	private attaching = false;
 	/**
@@ -634,6 +635,12 @@ export default class SystemRecordingPlugin extends Plugin {
 		// When Obsidian becomes frontmost, swap any live OS-only prompt to the
 		// in-app Notice (exclusive-channel policy).
 		this.registerDomEvent(window, "focus", () => this.onPromptWindowFocused());
+		// Electron can report isFocused=false while the document still has focus
+		// (no window "focus" event will fire). Visibility flips also recover an
+		// OS-only prompt when the user is already looking at Obsidian.
+		this.registerDomEvent(document, "visibilitychange", () => {
+			if (document.visibilityState === "visible") this.onPromptWindowFocused();
+		});
     }
 
 	/** One-shot startup dump so "no notifications" reports have concrete context. */
@@ -1024,9 +1031,11 @@ export default class SystemRecordingPlugin extends Plugin {
         const replace = opts?.replaceCurrent ?? false;
         // Hold stop-prompt suppression for the whole handoff (stop → provision →
         // spawn) so a calendar/detector end can't kill the take we're starting.
+        // Refcount: a second overlapping start that early-returns must not clear
+        // suppression for an earlier handoff still in flight.
         if (replace) {
             this.dismissStopPrompt();
-            this.replacingRecording = true;
+            this.replacingDepth++;
         }
         try {
             if (this.recorder.isRecording) {
@@ -1135,7 +1144,7 @@ export default class SystemRecordingPlugin extends Plugin {
                 this.starting = false;
             }
         } finally {
-            if (replace) this.replacingRecording = false;
+            if (replace) this.replacingDepth = Math.max(0, this.replacingDepth - 1);
         }
     }
 
@@ -1410,7 +1419,7 @@ export default class SystemRecordingPlugin extends Plugin {
 			focused,
 			actions: opts.actions.length,
 		});
-		return startDualChannelPrompt({
+		const controller = startDualChannelPrompt({
 			focused,
 			showInApp: () => {
 				notifLog("startOsPrompt: showInApp -> creating in-app notice", {
@@ -1445,6 +1454,18 @@ export default class SystemRecordingPlugin extends Plugin {
 				});
 			},
 		});
+		// Electron's isFocused can disagree with document.hasFocus while the user
+		// is already in Obsidian — recover the in-app Notice immediately so the
+		// exclusive-channel path doesn't leave them with only an OS banner.
+		if (
+			!focused &&
+			typeof document !== "undefined" &&
+			document.visibilityState === "visible" &&
+			document.hasFocus()
+		) {
+			controller.onBecameFocused();
+		}
+		return controller;
 	}
 
 	/**
@@ -1558,7 +1579,7 @@ export default class SystemRecordingPlugin extends Plugin {
 	private promptStopRecording(title: string, body: string): void {
 		// A back-to-back replace is stopping/starting on purpose — don't nag, and
 		// don't leave a stop action that could kill the next take.
-		if (this.replacingRecording) {
+		if (this.replacingDepth > 0) {
 			notifLog("promptStopRecording: suppressed (replace in flight)", {
 				title,
 			});
@@ -5463,8 +5484,8 @@ export default class SystemRecordingPlugin extends Plugin {
         try {
             const prefix = this.datePrefixOf(file);
             const suggested = prefix ? `${prefix} ${title}` : title;
-            // Open first, then flag — so a failed/missed offer before the modal
-            // can retry on a later re-enrich (issue #110).
+            // Mark settled only when the modal closes (Rename / Keep / dismiss),
+            // so Esc-without-action can still re-offer on a later enrich.
             new RenameModal(this.app, {
                 heading: t().adhoc.titleModal.heading,
                 desc: t().adhoc.titleModal.desc,
@@ -5474,10 +5495,12 @@ export default class SystemRecordingPlugin extends Plugin {
                 onRename: (value) => {
                     void this.renameMeetingNote(file, value, prefix);
                 },
+                onDecide: () => {
+                    void this.app.fileManager.processFrontMatter(file, (f) => {
+                        (f as Record<string, unknown>).mc_title_suggested = true;
+                    });
+                },
             }).open();
-            await this.app.fileManager.processFrontMatter(file, (f) => {
-                (f as Record<string, unknown>).mc_title_suggested = true;
-            });
         } catch (e) {
             console.warn("[Meeting Copilot] title suggestion failed", e);
         } finally {

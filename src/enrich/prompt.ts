@@ -78,24 +78,25 @@ export const ADHOC_TITLE_PROMPT_SUFFIX = `
 Also suggest a concise, specific title for this meeting — at most 8 words, in Title Case. Do not include dates, quotes, markdown, or trailing punctuation. After the notes, end your entire output with exactly one final line of this form (and nothing after it):
 <!--mc-title: Your Title Here-->`;
 
-/** Matches the trailing `<!--mc-title: …-->` line produced when the title suffix is requested. */
-const EMBEDDED_TITLE_RE = /<!--\s*mc-title:\s*([^>]*?)\s*-->/i;
+/** Matches a trailing `<!--mc-title: …-->` line produced when the title suffix is requested. */
+const EMBEDDED_TITLE_RE = /<!--\s*mc-title:\s*([^>]*?)\s*-->\s*$/i;
 
 /**
  * Splits an enrich model response into the notes body and an optional embedded
  * title. The title trailer is removed from the body so it never lands in the
- * AI-notes callout.
+ * AI-notes callout. Only a trailing marker counts — mid-body mentions are left alone.
  */
 export function extractEmbeddedTitle(raw: string): {
 	body: string;
 	title: string | null;
 } {
-	const match = raw.match(EMBEDDED_TITLE_RE);
+	const trimmed = raw.trimEnd();
+	const match = trimmed.match(EMBEDDED_TITLE_RE);
 	if (!match) {
-		return { body: raw.trimEnd(), title: null };
+		return { body: trimmed, title: null };
 	}
 	const title = match[1]?.trim() || null;
-	const body = raw.replace(EMBEDDED_TITLE_RE, "").trimEnd();
+	const body = trimmed.replace(EMBEDDED_TITLE_RE, "").trimEnd();
 	return { body, title };
 }
 
