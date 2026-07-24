@@ -1,8 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
-	buildTitlePrompt,
+	ADHOC_TITLE_PROMPT_SUFFIX,
 	DEFAULT_ENRICH_PROMPT,
 	effectiveEnrichPrompt,
+	extractEmbeddedTitle,
 	fillPrompt,
 } from "./prompt";
 
@@ -86,16 +87,47 @@ describe("effectiveEnrichPrompt", () => {
 	});
 });
 
-describe("buildTitlePrompt", () => {
-	it("includes notes and transcript", () => {
-		const out = buildTitlePrompt("plan the launch", "we discussed pricing");
-		expect(out).toContain("plan the launch");
-		expect(out).toContain("we discussed pricing");
-		expect(out).toContain("at most 8 words");
+describe("extractEmbeddedTitle", () => {
+	it("pulls the trailer and leaves the notes body", () => {
+		const raw = `### TL;DR\n- Shipped X\n\n<!--mc-title: Shipped The Launch-->`;
+		expect(extractEmbeddedTitle(raw)).toEqual({
+			body: "### TL;DR\n- Shipped X",
+			title: "Shipped The Launch",
+		});
 	});
 
-	it("falls back to (none) for empty inputs", () => {
-		const out = buildTitlePrompt("", "   ");
-		expect(out).toContain('"""\n(none)\n"""');
+	it("tolerates spacing variants in the marker", () => {
+		const raw = `notes\n<!-- mc-title:  Foo Bar  -->\n`;
+		expect(extractEmbeddedTitle(raw)).toEqual({
+			body: "notes",
+			title: "Foo Bar",
+		});
+	});
+
+	it("returns a null title when the trailer is missing", () => {
+		expect(extractEmbeddedTitle("### TL;DR\n- only notes")).toEqual({
+			body: "### TL;DR\n- only notes",
+			title: null,
+		});
+	});
+
+	it("ignores a mid-body marker that is not the trailing line", () => {
+		const raw = `<!--mc-title: Wrong-->\n### TL;DR\n- real notes`;
+		expect(extractEmbeddedTitle(raw)).toEqual({
+			body: raw.trimEnd(),
+			title: null,
+		});
+	});
+
+	it("ignores a marker that is only inline at the end", () => {
+		const raw = `### TL;DR\n- real notes <!--mc-title: Wrong-->`;
+		expect(extractEmbeddedTitle(raw)).toEqual({
+			body: raw.trimEnd(),
+			title: null,
+		});
+	});
+
+	it("the suffix asks for the machine-readable trailer", () => {
+		expect(ADHOC_TITLE_PROMPT_SUFFIX).toContain("<!--mc-title:");
 	});
 });

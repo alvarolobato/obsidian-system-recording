@@ -202,12 +202,6 @@
     margin-inline-start: 0;
 }
 
-/* Rich meeting-start prompt modal (opened from the system notification). */
-.mc-meeting-prompt-subtitle {
-    color: var(--text-muted);
-    margin-top: 0;
-}
-
 .meeting-copilot-template-input {
     width: 100%;
     font-family: var(--font-monospace);

@@ -151,7 +151,7 @@ export const en = {
 		createNoteAndRecord: "Create note and start recording",
 		recordAgain: "Record again (new take)",
 		stopRecordingAction: "Stop recording",
-		// Meeting-start prompt (native notification → in-app prompt / modal).
+		// Meeting-start prompt (native notification / in-app notice).
 		startsInMin: (min: number) =>
 			`Starts in ${min} min${min === 1 ? "" : "s"}`,
 		startingNow: "Starting now",
@@ -165,7 +165,11 @@ export const en = {
 		stopRecordingPrompt: "Stop recording?",
 		join: "Join",
 		record: "Record",
+		/** Primary record action when another take is already in progress. */
+		recordStopsCurrent: "Record (stops current)",
 		joinAndRecord: "Join & record",
+		/** Join & record when another take is already in progress. */
+		joinAndRecordStopsCurrent: "Join & record (stops current)",
 		openNote: "Open note",
 		dismiss: "Dismiss",
 		autoStarted: (title: string) => `Recording "${title}"`,
@@ -365,7 +369,7 @@ export const en = {
 		},
 		suggestAdhocTitle: {
 			name: "Suggest a title for unplanned meetings",
-			desc: "After enriching an unplanned (ad-hoc or detected) meeting, ask the LLM for a title and offer to rename the note, keeping the date prefix. Scheduled meetings keep their calendar title.",
+			desc: "When enriching an unplanned (ad-hoc or detected) meeting, ask the same LLM call for a title and offer to rename the note, keeping the date prefix. Scheduled meetings keep their calendar title.",
 		},
 		calendarHeading: "Google Calendar integration",
 		clientId: {

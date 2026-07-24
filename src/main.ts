@@ -59,7 +59,6 @@ import {
     findMeetingNoteForAudio,
     folderOf,
     insertTranscript,
-    isAdhocId,
     linkRecording,
     MeetingEventInfo,
     MeetingNoteConfig,
@@ -155,12 +154,16 @@ import { computeSpeechWindows } from "./transcribe/vadWindows";
 import { parseDictionary } from "./transcribe/dictionary";
 import type { TranscriptionModel } from "./transcribe/vendor/ApiSettings";
 import {
-    buildTitlePrompt,
+    ADHOC_TITLE_PROMPT_SUFFIX,
     effectiveEnrichPrompt,
     ENRICH_SYSTEM_PROMPT,
+    extractEmbeddedTitle,
     fillPrompt,
-    TITLE_SYSTEM_PROMPT,
 } from "./enrich/prompt";
+import {
+    cleanSuggestedTitle,
+    shouldSuggestAdhocTitle,
+} from "./enrich/adhocTitle";
 import { RenameModal } from "./ui/renameModal";
 import { t } from "./i18n";
 import { TypedEventBus } from "./util/events";
@@ -192,7 +195,6 @@ import {
 	DualChannelController,
 	InAppHandle,
 } from "./ui/dualChannelPrompt";
-import { MeetingPromptModal } from "./ui/meetingPromptModal";
 import { notifLog, notifDebugEnabled } from "./util/notifLog";
 import { decideWindowFocused, BrowserWindowState } from "./util/windowFocus";
 import {
@@ -319,11 +321,9 @@ export default class SystemRecordingPlugin extends Plugin {
 	private openedLinkEventIds = new Set<string>();
 	/**
 	 * Meeting prompts currently on screen, keyed by meeting (calendar event id,
-	 * or a detection key). Each is a dual-channel controller (an always-shown
-	 * in-app notice, plus a native OS notification when Obsidian isn't frontmost).
-	 * A new prompt for the *same* key supersedes its predecessor (upcoming →
-	 * start), while distinct meetings coexist so overlapping / post-wake catch-up
-	 * prompts don't clobber each other.
+	 * or a detection key). Each is an exclusive-channel controller (in-app Notice
+	 * when focused, OS notification when not — never both). A new prompt
+	 * supersedes *all* live prompts so surfaces don't stack.
 	 */
 	private meetingNotices = new Map<string, DualChannelController>();
 	/**
@@ -335,6 +335,13 @@ export default class SystemRecordingPlugin extends Plugin {
 	private stopPromptNotice: DualChannelController | null = null;
 	/** Resolvers waiting for the current recording to fully stop (back-to-back chaining). */
 	private stopWaiters: Array<() => void> = [];
+	/**
+	 * Nested count of in-flight `replaceCurrent` handoffs. Suppresses stop
+	 * prompts while > 0. A refcount (not a boolean) so a concurrent
+	 * startRecording that early-returns can't clear suppression for another
+	 * handoff still in stopAndWait/provision/spawn.
+	 */
+	private replacingDepth = 0;
 	/** True while a stopped recording is still being linked/handled in attachRecording. */
 	private attaching = false;
 	/**
@@ -625,6 +632,15 @@ export default class SystemRecordingPlugin extends Plugin {
 		requestNotificationPermission();
 		this.logNotificationEnvironment();
 		this.updateDetector();
+		// When Obsidian becomes frontmost, swap any live OS-only prompt to the
+		// in-app Notice (exclusive-channel policy).
+		this.registerDomEvent(window, "focus", () => this.onPromptWindowFocused());
+		// Electron can report isFocused=false while the document still has focus
+		// (no window "focus" event will fire). Visibility flips also recover an
+		// OS-only prompt when the user is already looking at Obsidian.
+		this.registerDomEvent(document, "visibilitychange", () => {
+			if (document.visibilityState === "visible") this.onPromptWindowFocused();
+		});
     }
 
 	/** One-shot startup dump so "no notifications" reports have concrete context. */
@@ -932,10 +948,6 @@ export default class SystemRecordingPlugin extends Plugin {
             new Notice(t().notices.macOnly);
             return;
         }
-        if (this.recorder.isRecording) {
-            new Notice(t().notices.alreadyRecording);
-            return;
-        }
         const now = new Date();
         const info: MeetingEventInfo = {
             // A stable non-empty id makes it a recognized meeting note right
@@ -959,13 +971,16 @@ export default class SystemRecordingPlugin extends Plugin {
             const leaf = this.app.workspace.getLeaf(false);
             await leaf.openFile(ref.file);
             this.selectNoteTitle(leaf);
-            await this.startRecording({
-                folder: ref.folder,
-                basename: ref.basename,
-                notePath: ref.notePath,
-                eventId: info.id,
-                note: ref.file,
-            });
+            await this.startRecording(
+                {
+                    folder: ref.folder,
+                    basename: ref.basename,
+                    notePath: ref.notePath,
+                    eventId: info.id,
+                    note: ref.file,
+                },
+                { replaceCurrent: true }
+            );
             new Notice(t().adhoc.started);
         } catch (e) {
             new Notice(
@@ -1013,110 +1028,123 @@ export default class SystemRecordingPlugin extends Plugin {
             starting: this.starting,
             replaceCurrent: opts?.replaceCurrent ?? false,
         });
-        if (this.recorder.isRecording) {
-            // Back-to-back meetings: stop the prior recording (and let it finish
-            // linking/auto-transcribing) before starting this one, so B's first
-            // minutes aren't lost to an "already recording" bail.
-            if (opts?.replaceCurrent) {
-                await this.stopAndWait();
-            } else {
-                console.warn(
-                    "[Meeting Copilot][recorder] startRecording skipped: already recording"
-                );
-                new Notice(t().notices.alreadyRecording);
-                return;
-            }
+        const replace = opts?.replaceCurrent ?? false;
+        // Hold stop-prompt suppression for the whole handoff (stop → provision →
+        // spawn) so a calendar/detector end can't kill the take we're starting.
+        // Refcount: a second overlapping start that early-returns must not clear
+        // suppression for an earlier handoff still in flight.
+        if (replace) {
+            this.dismissStopPrompt();
+            this.replacingDepth++;
         }
-
-        // A start is already in progress (binary provisioning may be awaiting)
-        if (this.starting) {
-            console.warn(
-                "[Meeting Copilot][recorder] startRecording skipped: a start is already in progress"
-            );
-            return;
-        }
-
-        if (!Platform.isMacOS) {
-            new Notice(t().notices.macOnly);
-            return;
-        }
-
-        this.starting = true;
         try {
-            // Ensure the recorder helper runtime is present and verified: the
-            // binary AND the whisper.framework dylib it links at launch (dyld
-            // rejects the binary without it, so this guards recording too — not
-            // just transcription).
-            let binaryPath: string;
-            try {
-                binaryPath = await this.ensureHelperRuntime();
-            } catch (e) {
-                new Notice(e instanceof Error ? e.message : String(e));
+            if (this.recorder.isRecording) {
+                // Back-to-back meetings: stop the prior recording (and let it finish
+                // linking/auto-transcribing) before starting this one, so B's first
+                // minutes aren't lost to an "already recording" bail.
+                if (replace) {
+                    await this.stopAndWait();
+                } else {
+                    console.warn(
+                        "[Meeting Copilot][recorder] startRecording skipped: already recording"
+                    );
+                    new Notice(t().notices.alreadyRecording);
+                    return;
+                }
+            }
+
+            // A start is already in progress (binary provisioning may be awaiting)
+            if (this.starting) {
+                console.warn(
+                    "[Meeting Copilot][recorder] startRecording skipped: a start is already in progress"
+                );
                 return;
             }
 
-            const adapter = this.app.vault.adapter;
-            // Sampled once so the path extension and the helper's --format
-            // can't diverge if the settings toggle flips during the awaits
-            // below.
-            const format = this.recordingFormat();
-
-            // Meeting recordings go under a "Recordings" subfolder of the note's
-            // own folder (configurable; empty = colocate beside the note).
-            // A note at the vault root has folder "" (nothing to create).
-            // Ensure the note's folder before its (nested) Recordings child,
-            // so the subfolder mkdir can't fail on a missing parent.
-            if (meeting.folder && !(await adapter.exists(meeting.folder))) {
-                await adapter.mkdir(meeting.folder);
+            if (!Platform.isMacOS) {
+                new Notice(t().notices.macOnly);
+                return;
             }
-            const recFolder = this.recordingFolderFor(meeting.folder);
-            if (
-                recFolder &&
-                recFolder !== meeting.folder &&
-                !(await adapter.exists(recFolder))
-            ) {
-                await adapter.mkdir(recFolder);
+
+            this.starting = true;
+            try {
+                // Ensure the recorder helper runtime is present and verified: the
+                // binary AND the whisper.framework dylib it links at launch (dyld
+                // rejects the binary without it, so this guards recording too — not
+                // just transcription).
+                let binaryPath: string;
+                try {
+                    binaryPath = await this.ensureHelperRuntime();
+                } catch (e) {
+                    new Notice(e instanceof Error ? e.message : String(e));
+                    return;
+                }
+
+                const adapter = this.app.vault.adapter;
+                // Sampled once so the path extension and the helper's --format
+                // can't diverge if the settings toggle flips during the awaits
+                // below.
+                const format = this.recordingFormat();
+
+                // Meeting recordings go under a "Recordings" subfolder of the note's
+                // own folder (configurable; empty = colocate beside the note).
+                // A note at the vault root has folder "" (nothing to create).
+                // Ensure the note's folder before its (nested) Recordings child,
+                // so the subfolder mkdir can't fail on a missing parent.
+                if (meeting.folder && !(await adapter.exists(meeting.folder))) {
+                    await adapter.mkdir(meeting.folder);
+                }
+                const recFolder = this.recordingFolderFor(meeting.folder);
+                if (
+                    recFolder &&
+                    recFolder !== meeting.folder &&
+                    !(await adapter.exists(recFolder))
+                ) {
+                    await adapter.mkdir(recFolder);
+                }
+                const relativePath = await this.uniqueRecordingPath(
+                    adapter,
+                    recFolder,
+                    meeting.basename,
+                    format
+                );
+                this.currentMeetingNotePath = meeting.notePath;
+                this.currentMeetingNote = meeting.note ?? null;
+                this.currentRecordingEventId = meeting.eventId ?? null;
+                this.currentRecordingEventEnd = meeting.eventEnd ?? null;
+
+                this.currentRecordingPath = relativePath;
+                const vaultBasePath =
+                    adapter instanceof FileSystemAdapter ? adapter.getBasePath() : "";
+                const absolutePath = path.join(vaultBasePath, relativePath);
+
+                // Start recording. --split writes the per-speaker sidecars only when
+                // separation is actually usable, so we don't pay for them otherwise.
+                // Re-arm the screen-recording-settings opener for this attempt: a
+                // permission failure surfaces asynchronously via onError, and each
+                // new recording attempt is a deliberate user action that should get
+                // one fresh chance to deep-link to System Settings.
+                this.screenSettingsOpened = false;
+                const inputDeviceUid = await this.resolveInputDeviceUid(binaryPath);
+                this.recorder.start(binaryPath, absolutePath, {
+                    split: this.shouldSeparateSpeakers(),
+                    format,
+                    inputDeviceUid,
+                });
+                this.recordingStartTime = Date.now();
+                this.startDurationTimer();
+                this.updateRibbonIcon(true);
+                this.agendaEvents.emit("changed", undefined);
+                // A recording is now underway — drop every pending join/record/stop
+                // prompt so a stale action can't kill this take.
+                this.dismissAllLivePrompts();
+
+                new Notice(t().notices.recordingStarted);
+            } finally {
+                this.starting = false;
             }
-            const relativePath = await this.uniqueRecordingPath(
-                adapter,
-                recFolder,
-                meeting.basename,
-                format
-            );
-            this.currentMeetingNotePath = meeting.notePath;
-            this.currentMeetingNote = meeting.note ?? null;
-            this.currentRecordingEventId = meeting.eventId ?? null;
-            this.currentRecordingEventEnd = meeting.eventEnd ?? null;
-
-            this.currentRecordingPath = relativePath;
-            const vaultBasePath =
-                adapter instanceof FileSystemAdapter ? adapter.getBasePath() : "";
-            const absolutePath = path.join(vaultBasePath, relativePath);
-
-            // Start recording. --split writes the per-speaker sidecars only when
-            // separation is actually usable, so we don't pay for them otherwise.
-            // Re-arm the screen-recording-settings opener for this attempt: a
-            // permission failure surfaces asynchronously via onError, and each
-            // new recording attempt is a deliberate user action that should get
-            // one fresh chance to deep-link to System Settings.
-            this.screenSettingsOpened = false;
-            const inputDeviceUid = await this.resolveInputDeviceUid(binaryPath);
-            this.recorder.start(binaryPath, absolutePath, {
-                split: this.shouldSeparateSpeakers(),
-                format,
-                inputDeviceUid,
-            });
-            this.recordingStartTime = Date.now();
-            this.startDurationTimer();
-            this.updateRibbonIcon(true);
-            this.agendaEvents.emit("changed", undefined);
-            // A recording is now underway, so any pending "meeting detected —
-            // record?" prompt is moot regardless of how this start was triggered.
-            this.dismissMeetingNotices("detect:");
-
-            new Notice(t().notices.recordingStarted);
         } finally {
-            this.starting = false;
+            if (replace) this.replacingDepth = Math.max(0, this.replacingDepth - 1);
         }
     }
 
@@ -1363,13 +1391,12 @@ export default class SystemRecordingPlugin extends Plugin {
 	}
 
 	/**
-	 * Posts a meeting prompt across two channels so it's never silently lost:
+	 * Posts a meeting prompt on exactly one channel so surfaces never stack:
 	 *
-	 *  - The in-app notice is **always** shown — it's reliable and it waits in
-	 *    Obsidian, so the prompt is there when the user comes back.
-	 *  - A native OS notification is added **only when Obsidian isn't frontmost**
-	 *    (an in-app notice can't be seen there); when frontmost it would just
-	 *    duplicate the in-app notice, so it's skipped.
+	 *  - **Focused** → in-app Notice only.
+	 *  - **Unfocused** → native OS notification only; when Obsidian becomes
+	 *    frontmost, {@link onPromptWindowFocused} closes the OS handle and shows
+	 *    the in-app Notice.
 	 *
 	 * The returned controller's `dispose()` closes the OS notification by default
 	 * (supersede / user action); housekeeping sweeps pass `{ keepOs: true }` to
@@ -1383,7 +1410,7 @@ export default class SystemRecordingPlugin extends Plugin {
 		onClick: () => void;
 		/** Native action buttons (first = default). */
 		actions: OsNotificationAction[];
-		/** Builds the (always-shown) in-app notice. */
+		/** Builds the in-app notice (called when focused, or on focus-swap). */
 		showInApp: () => InAppHandle;
 	}): DualChannelController {
 		const focused = this.isWindowFocused();
@@ -1392,7 +1419,7 @@ export default class SystemRecordingPlugin extends Plugin {
 			focused,
 			actions: opts.actions.length,
 		});
-		return startDualChannelPrompt({
+		const controller = startDualChannelPrompt({
 			focused,
 			showInApp: () => {
 				notifLog("startOsPrompt: showInApp -> creating in-app notice", {
@@ -1400,7 +1427,7 @@ export default class SystemRecordingPlugin extends Plugin {
 				});
 				return opts.showInApp();
 			},
-			showOs: () => {
+			showOs: (fallbackToInApp) => {
 				notifLog("startOsPrompt: unfocused -> posting OS notification", {
 					title: opts.title,
 				});
@@ -1418,13 +1445,38 @@ export default class SystemRecordingPlugin extends Plugin {
 						// to teach (once) how to make them show/persist reliably.
 						this.maybeShowNotificationStyleHint();
 					},
-					onFailed: () =>
+					onFailed: () => {
 						notifLog("startOsPrompt: onFailed (OS could not show)", {
 							title: opts.title,
-						}),
+						});
+						fallbackToInApp();
+					},
 				});
 			},
 		});
+		// Electron's isFocused can disagree with document.hasFocus while the user
+		// is already in Obsidian — recover the in-app Notice immediately so the
+		// exclusive-channel path doesn't leave them with only an OS banner.
+		if (
+			!focused &&
+			typeof document !== "undefined" &&
+			document.visibilityState === "visible" &&
+			document.hasFocus()
+		) {
+			controller.onBecameFocused();
+		}
+		return controller;
+	}
+
+	/**
+	 * Obsidian became frontmost: swap every live OS-only prompt to its in-app
+	 * Notice so the full action set is waiting in the window.
+	 */
+	private onPromptWindowFocused(): void {
+		this.stopPromptNotice?.onBecameFocused();
+		for (const controller of this.meetingNotices.values()) {
+			controller.onBecameFocused();
+		}
 	}
 
 	/**
@@ -1520,27 +1572,33 @@ export default class SystemRecordingPlugin extends Plugin {
 
 	/**
 	 * Offers to stop the current recording (a recording never stops on its own)
-	 * on both channels: an always-shown in-app notice, plus — when Obsidian isn't
-	 * frontmost — a native OS notification with a "Stop recording" action.
-	 * Supersedes any prior stop prompt so end-of-meeting triggers that overlap
-	 * (detected-meeting end + calendar event end) don't stack two prompts.
+	 * on a single channel: in-app Notice when focused, OS notification when not.
+	 * Supersedes every live prompt so end-of-meeting triggers that overlap
+	 * (detected-meeting end + calendar event end) don't stack.
 	 */
 	private promptStopRecording(title: string, body: string): void {
+		// A back-to-back replace is stopping/starting on purpose — don't nag, and
+		// don't leave a stop action that could kill the next take.
+		if (this.replacingDepth > 0) {
+			notifLog("promptStopRecording: suppressed (replace in flight)", {
+				title,
+			});
+			return;
+		}
 		notifLog("promptStopRecording", { title, body });
-		this.stopPromptNotice?.dispose();
+		this.dismissAllLivePrompts();
 		const stop = (): void => {
 			// Tear down our own prompt first (hides the in-app notice and closes
 			// the OS notification) so nothing stale survives the stop.
-			this.stopPromptNotice?.dispose();
-			this.stopPromptNotice = null;
+			this.dismissStopPrompt();
 			this.stopRecording();
 		};
 		this.stopPromptNotice = this.startOsPrompt({
 			title,
 			body,
 			webHint: t().event.notificationWebHint,
-			// The body click can't be the destructive stop; `notifyOs` already
-			// brings Obsidian forward, surfacing the always-shown in-app prompt.
+			// Body click focuses Obsidian (handled by notifyOs); the in-app Notice
+			// appears via onBecameFocused with the Stop action.
 			onClick: () => {},
 			actions: [{ text: t().event.stopRecordingAction, run: stop }],
 			showInApp: () =>
@@ -1549,23 +1607,15 @@ export default class SystemRecordingPlugin extends Plugin {
 	}
 
 	/**
-	 * Prompts the user to act on an upcoming/starting meeting across two channels
-	 * so it's seen regardless of window focus (a focused-but-elsewhere user —
-	 * other Space/monitor, Obsidian behind other windows — would otherwise miss
-	 * it):
-	 *
-	 *  - an in-app **multi-action Notice** — always shown, so the prompt is
-	 *    waiting in Obsidian even if the user is away when it fires, and
-	 *  - a **native OS notification** (title = meeting name, body = timing) added
-	 *    only when Obsidian isn't frontmost — its action buttons render as real
-	 *    macOS buttons (default first, rest under the dropdown) and its body click
-	 *    opens the rich prompt modal.
+	 * Prompts the user to act on an upcoming/starting meeting on a single channel
+	 * (in-app Notice when focused, OS notification when not). No modal — the
+	 * Notice / native action button carry Join, Record, Join & record, Open note.
 	 *
 	 * `onRecord` is the record action; a valid https `meetLink` adds the Join
 	 * affordances, and an `onOpenNote` adds an "Open note" action (Granola-style).
 	 */
 	private promptMeeting(opts: {
-		/** Stable per-meeting key: a same-key reprompt supersedes, distinct keys coexist. */
+		/** Stable per-meeting key (used for bookkeeping; a new prompt clears all). */
 		key: string;
 		title: string;
 		subtitle: string;
@@ -1585,10 +1635,9 @@ export default class SystemRecordingPlugin extends Plugin {
 			opts.meetLink && opts.meetLink.startsWith("https://")
 				? opts.meetLink
 				: null;
-		// Every channel (in-app notice, native OS buttons, modal) shares these
-		// handlers, and each first dismisses the in-app notice for this meeting:
-		// acting from the OS notification or the modal must not leave the parallel
-		// in-app Notice lingering on screen.
+		// Every channel shares these handlers, and each first dismisses the live
+		// prompt for this meeting so acting from the OS notification doesn't leave
+		// a parallel in-app Notice after a focus-swap.
 		const dismissNotice = (): void => this.dismissMeetingNotice(opts.key);
 		const onRecord = (): void => {
 			dismissNotice();
@@ -1616,64 +1665,51 @@ export default class SystemRecordingPlugin extends Plugin {
 				}
 			: null;
 
-		// Action order mirrors the modal / Granola: a combined primary (Join &
-		// record) when there's a link — else Record — then Join, then Open note.
-		// Only the first becomes the OS notification's button (see below); the
-		// full set stays in the in-app notice and the modal. The combined action
-		// is the record path when a link exists, so no separate Record button is
-		// needed there.
+		// Action order mirrors Granola: a combined primary (Join & record) when
+		// there's a link — else Record — then Join, then Open note. Only the first
+		// becomes the OS notification's button; the full set stays in the in-app
+		// notice. When already recording, primary labels warn that the current
+		// take will stop.
 		const e = t().event;
+		const stopsCurrent = this.recorder.isRecording;
 		const actions: NoticeAction[] = [];
 		if (onJoinAndRecord) {
-			actions.push({ label: e.joinAndRecord, onClick: onJoinAndRecord, cta: true });
+			actions.push({
+				label: stopsCurrent ? e.joinAndRecordStopsCurrent : e.joinAndRecord,
+				onClick: onJoinAndRecord,
+				cta: true,
+			});
 			if (onJoin) actions.push({ label: e.join, onClick: onJoin });
 		} else {
-			actions.push({ label: e.record, onClick: onRecord, cta: true });
+			actions.push({
+				label: stopsCurrent ? e.recordStopsCurrent : e.record,
+				onClick: onRecord,
+				cta: true,
+			});
 		}
 		if (onOpenNote)
 			actions.push({ label: e.openNote, onClick: onOpenNote });
 
-		// Opens the rich prompt modal (the OS notification's body-click target).
-		const openModal = (): void => {
-			new MeetingPromptModal(this.app, {
-				title: opts.title,
-				subtitle: opts.subtitle,
-				hasLink: link !== null,
-				joinLabel: e.join,
-				recordLabel: e.record,
-				joinAndRecordLabel: e.joinAndRecord,
-				openNoteLabel: e.openNote,
-				dismissLabel: e.dismiss,
-				onJoin: onJoin ?? ((): void => undefined),
-				onRecord,
-				onJoinAndRecord: onJoinAndRecord ?? onRecord,
-				onOpenNote,
-			}).open();
-		};
-
-		// Supersede an earlier prompt for the *same* meeting (e.g. the lead-time
-		// notice when the start boundary now fires) rather than stacking a second
-		// prompt — but leave other meetings' prompts alone so overlapping
-		// meetings each keep theirs.
-		this.meetingNotices.get(opts.key)?.dispose();
+		// One prompt surface at a time — drop every live meeting/stop prompt
+		// before posting this one.
+		this.dismissAllLivePrompts();
 		this.meetingNotices.set(
 			opts.key,
 			this.startOsPrompt({
 				title: opts.title,
 				body: opts.subtitle,
 				webHint: e.notificationWebHint,
-				onClick: openModal,
+				// Body click focuses Obsidian; the in-app Notice (full actions)
+				// appears via onBecameFocused. No modal.
+				onClick: () => {},
 				// macOS/Electron renders a *single* action as a named inline
 				// button but collapses two-or-more into a generic "Options ▾"
 				// dropdown. Users want the named default button, so the OS
 				// notification carries only the primary action; the rest stay one
-				// tap away via the body click (modal) and the in-app notice.
+				// tap away via the in-app notice after focus.
 				actions: actions
 					.slice(0, 1)
 					.map((a) => ({ text: a.label, run: a.onClick })),
-				// The in-app multi-action notice is always shown (it carries the
-				// full set of actions and waits in Obsidian); the OS notification
-				// above is the additive channel when Obsidian isn't frontmost.
 				showInApp: () =>
 					multiActionNotice(
 						`${opts.title} — ${opts.subtitle}`,
@@ -1689,6 +1725,25 @@ export default class SystemRecordingPlugin extends Plugin {
 
 	/** Prefix for calendar-event prompt keys (vs. `detect:` for detected meetings). */
 	private static readonly CAL_NOTICE_PREFIX = "cal:";
+
+	/** Drops the live stop-recording prompt, if any. */
+	private dismissStopPrompt(): void {
+		this.stopPromptNotice?.dispose();
+		this.stopPromptNotice = null;
+	}
+
+	/**
+	 * Drops every live meeting + stop prompt (closes OS unless a caller already
+	 * disposed with keepOs). Used when starting a recording or posting a new
+	 * exclusive prompt so stale actions can't fire.
+	 */
+	private dismissAllLivePrompts(): void {
+		for (const controller of this.meetingNotices.values()) {
+			controller.dispose();
+		}
+		this.meetingNotices.clear();
+		this.dismissStopPrompt();
+	}
 
 	/**
 	 * Dismisses the persistent meeting prompt for one key (if any). Used once a
@@ -4776,8 +4831,7 @@ export default class SystemRecordingPlugin extends Plugin {
         this.currentRecordingEventEnd = null;
         // Recording has ended, so any "meeting ended — stop recording?" prompt is
         // moot; drop it.
-        this.stopPromptNotice?.dispose();
-        this.stopPromptNotice = null;
+        this.dismissStopPrompt();
         this.agendaEvents.emit("changed", undefined);
         // A stop that ends without going through attachRecording (no file, or an
         // error) must still release any back-to-back waiter.
@@ -5199,6 +5253,12 @@ export default class SystemRecordingPlugin extends Plugin {
             return;
         }
         let enrichedOk = false;
+        // Captured inside the try once frontmatter is read; used after a successful
+        // enrich so we don't re-query a lagging metadataCache for the title gate.
+        let eventIdForTitle: unknown;
+        let alreadySuggestedForTitle: unknown;
+        /** Title embedded in the enrich response (same LLM call); offered after write. */
+        let embeddedTitle: string | null = null;
         try {
             const content = await this.app.vault.read(file);
             // Gather manual notes wherever they were written (incl. above the
@@ -5233,6 +5293,15 @@ export default class SystemRecordingPlugin extends Plugin {
 
             const fm = (this.app.metadataCache.getFileCache(file)?.frontmatter ??
                 {}) as Record<string, unknown>;
+            // Capture identity flags *before* we write — a post-write metadataCache
+            // lookup can lag and skip the ad-hoc title offer (issue #110).
+            eventIdForTitle = fm["event_id"];
+            alreadySuggestedForTitle = fm["mc_title_suggested"];
+            const wantTitle = shouldSuggestAdhocTitle({
+                suggestAdhocTitle: this.settings.suggestAdhocTitle,
+                eventId: eventIdForTitle,
+                alreadySuggested: alreadySuggestedForTitle,
+            });
             const attendeesVal = fm["attendees"];
             const titleVal = fm["title"];
             const dateVal = fm["date"];
@@ -5250,20 +5319,44 @@ export default class SystemRecordingPlugin extends Plugin {
 
             new Notice(t().notices.enriching);
             this.setEnrichStatus(t().statusBar.enriching, "busy");
-            const output = await chatComplete({
-                baseUrl: apiBaseUrl,
-                apiKey: apiKey,
-                model: enrichModel,
-                system: ENRICH_SYSTEM_PROMPT,
-                user: fillPrompt(
+            // Ask for an ad-hoc title in the *same* enrich call (trailer parsed
+            // below) — no second LLM round-trip over the transcript.
+            const userPrompt =
+                fillPrompt(
                     effectiveEnrichPrompt(
                         this.settings.enrichPromptCustomize,
                         this.settings.enrichPrompt
                     ),
                     ctx
-                ),
+                ) + (wantTitle ? ADHOC_TITLE_PROMPT_SUFFIX : "");
+            const rawOutput = await chatComplete({
+                baseUrl: apiBaseUrl,
+                apiKey: apiKey,
+                model: enrichModel,
+                system: ENRICH_SYSTEM_PROMPT,
+                user: userPrompt,
                 signal,
             });
+            // Only parse/strip a title trailer when we asked for one — calendar
+            // enrichments must never feed RenameModal (scheduled titles stay).
+            const extracted = wantTitle
+                ? extractEmbeddedTitle(rawOutput)
+                : { body: rawOutput, title: null };
+            const output = extracted.body;
+            if (wantTitle) {
+                const cleaned = extracted.title
+                    ? cleanSuggestedTitle(extracted.title)
+                    : "";
+                // sanitizeName maps blank → "Untitled"; don't offer that.
+                if (cleaned && cleaned !== "Untitled") {
+                    embeddedTitle = cleaned;
+                } else {
+                    console.warn(
+                        "[Meeting Copilot] title suggestion skipped: enrich response missing title trailer",
+                        file.path
+                    );
+                }
+            }
             // Re-read in case the note changed during the network call.
             const current = await this.app.vault.read(file);
             // The transcript callout has no heading of its own, so it lives
@@ -5354,15 +5447,19 @@ export default class SystemRecordingPlugin extends Plugin {
             throw e;
         }
 
-        // After the AI summary, offer a generated title for unplanned meetings
-        // (once). Scheduled meetings keep their calendar title.
+        // After the AI summary, offer the title that came back in the same enrich
+        // response (once). Only ad-hoc notes request a trailer / reach here with
+        // a title; scheduled meetings keep their calendar title.
         if (
             enrichedOk &&
-            this.settings.suggestAdhocTitle &&
-            this.isAdhocNote(file) &&
-            !this.titleAlreadySuggested(file)
+            embeddedTitle &&
+            shouldSuggestAdhocTitle({
+                suggestAdhocTitle: this.settings.suggestAdhocTitle,
+                eventId: eventIdForTitle,
+                alreadySuggested: alreadySuggestedForTitle,
+            })
         ) {
-            await this.suggestAdhocTitle(file, transcriptOverride, signal);
+            await this.offerAdhocTitle(file, embeddedTitle);
         }
     }
 
@@ -5371,68 +5468,24 @@ export default class SystemRecordingPlugin extends Plugin {
         return signal.aborted || error instanceof ChatAbortError;
     }
 
-    /** True once we've offered an AI title for this note (flagged in frontmatter). */
-    private titleAlreadySuggested(file: TFile): boolean {
-        const fm = this.app.metadataCache.getFileCache(file)?.frontmatter as
-            | Record<string, unknown>
-            | undefined;
-        return fm?.["mc_title_suggested"] === true;
-    }
-
-    /** True for unplanned meetings (ad-hoc/detected), whose event_id we prefix "adhoc-". */
-    private isAdhocNote(file: TFile): boolean {
-        const fm = this.app.metadataCache.getFileCache(file)?.frontmatter as
-            | Record<string, unknown>
-            | undefined;
-        const id = fm?.["event_id"];
-        return typeof id === "string" && isAdhocId(id);
-    }
-
     /**
-     * Asks the LLM for a title based on the notes/transcript and offers to
-     * rename the note, keeping the date/time prefix. No-op on empty content.
+     * Offers to rename an ad-hoc note to a title already produced by enrich.
+     * No LLM call — the title was embedded in the enrich response.
      */
-    private async suggestAdhocTitle(
-        file: TFile,
-        transcriptOverride?: string,
-        signal?: AbortSignal
-    ): Promise<void> {
-        const { apiBaseUrl, apiKey, enrichModel } = this.settings;
-        if (!apiBaseUrl || !apiKey || !enrichModel) return;
-        // Guard against a metadata-cache lag racing two offers for the same note.
-        if (this.titleSuggestingPaths.has(file.path)) return;
+    private async offerAdhocTitle(file: TFile, title: string): Promise<void> {
+        if (this.titleSuggestingPaths.has(file.path)) {
+            console.warn(
+                "[Meeting Copilot] title suggestion skipped: already in flight",
+                file.path
+            );
+            return;
+        }
         this.titleSuggestingPaths.add(file.path);
         try {
-            const content = await this.app.vault.read(file);
-            const notes = extractSection(content, "## Notes");
-            const transcript =
-                transcriptOverride && transcriptOverride.trim().length > 0
-                    ? transcriptOverride
-                    : extractTranscript(content);
-            if (!notes && !transcript) return;
-
-            this.setEnrichStatus(t().adhoc.suggestingTitle, "busy");
-            const raw = await chatComplete({
-                baseUrl: apiBaseUrl,
-                apiKey,
-                model: enrichModel,
-                system: TITLE_SYSTEM_PROMPT,
-                user: buildTitlePrompt(notes, transcript),
-                signal,
-            });
-            // Don't wipe a concurrent transcription's status; we only set ours
-            // when the queue was idle.
-            if (!this.transcriptionRunning) this.clearActionStatus();
-            const title = this.cleanSuggestedTitle(raw);
-            if (!title) return;
-
-            // Mark as offered so we don't re-prompt on a later re-enrich.
-            await this.app.fileManager.processFrontMatter(file, (f) => {
-                (f as Record<string, unknown>).mc_title_suggested = true;
-            });
-
             const prefix = this.datePrefixOf(file);
             const suggested = prefix ? `${prefix} ${title}` : title;
+            // Flag only on Rename/Keep — Esc/click-away leaves room to re-offer
+            // on a later enrich (issue #110).
             new RenameModal(this.app, {
                 heading: t().adhoc.titleModal.heading,
                 desc: t().adhoc.titleModal.desc,
@@ -5442,23 +5495,17 @@ export default class SystemRecordingPlugin extends Plugin {
                 onRename: (value) => {
                     void this.renameMeetingNote(file, value, prefix);
                 },
+                onDecide: () => {
+                    void this.app.fileManager.processFrontMatter(file, (f) => {
+                        (f as Record<string, unknown>).mc_title_suggested = true;
+                    });
+                },
             }).open();
         } catch (e) {
             console.warn("[Meeting Copilot] title suggestion failed", e);
-            if (!this.transcriptionRunning) this.clearActionStatus();
         } finally {
             this.titleSuggestingPaths.delete(file.path);
         }
-    }
-
-    /** Reduces an LLM response to a single clean filename-safe title line. */
-    private cleanSuggestedTitle(raw: string): string {
-        const firstLine = raw.split("\n").map((l) => l.trim()).find(Boolean) ?? "";
-        const unquoted = firstLine
-            .replace(/^["'“”‘’]+|["'“”‘’]+$/g, "")
-            .replace(/[.。]+$/, "")
-            .trim();
-        return sanitizeName(unquoted).slice(0, 100).trim();
     }
 
     /** The leading `YYYY-MM-DD [HHmm]` portion of a note's basename, or from frontmatter. */

@@ -68,29 +68,37 @@ Keep it tight:
 - Do not quote the transcript verbatim or narrate it turn by turn.
 - Output only the Markdown notes — no preamble, no closing remarks, and no top-level "#" heading.`;
 
-/** System role for generating a concise meeting title. */
-export const TITLE_SYSTEM_PROMPT =
-	"You write short, specific titles for meeting notes.";
+/**
+ * Appended to the enrich user prompt when we also want an ad-hoc title from the
+ * same LLM call. Asks for a machine-readable trailer that
+ * {@link extractEmbeddedTitle} strips before the notes are inserted.
+ */
+export const ADHOC_TITLE_PROMPT_SUFFIX = `
+
+Also suggest a concise, specific title for this meeting — at most 8 words, in Title Case. Do not include dates, quotes, markdown, or trailing punctuation. After the notes, end your entire output with exactly one final line of this form (and nothing after it):
+<!--mc-title: Your Title Here-->`;
+
+/** Matches a trailing `<!--mc-title: …-->` line produced when the title suffix is requested. */
+const EMBEDDED_TITLE_RE =
+	/(?:^|\n)[ \t]*<!--\s*mc-title:\s*([^>]*?)\s*-->[ \t]*$/i;
 
 /**
- * Builds the user prompt asking for a concise title from the notes/transcript.
- * Keep this tight — the response is used directly as a filename, so it must be
- * a single plain line.
+ * Splits an enrich model response into the notes body and an optional embedded
+ * title. The title trailer is removed from the body so it never lands in the
+ * AI-notes callout. Only a trailing marker counts — mid-body mentions are left alone.
  */
-export function buildTitlePrompt(notes: string, transcript: string): string {
-	const n = notes.trim() || "(none)";
-	const t = transcript.trim() || "(none)";
-	return `Suggest a concise, specific title for the following notes — at most 8 words, in Title Case. Do not include dates, quotes, markdown, or trailing punctuation. Output only the title on a single line.
-
-Notes:
-"""
-${n}
-"""
-
-Transcript:
-"""
-${t}
-"""`;
+export function extractEmbeddedTitle(raw: string): {
+	body: string;
+	title: string | null;
+} {
+	const trimmed = raw.trimEnd();
+	const match = trimmed.match(EMBEDDED_TITLE_RE);
+	if (!match) {
+		return { body: trimmed, title: null };
+	}
+	const title = match[1]?.trim() || null;
+	const body = trimmed.slice(0, match.index).trimEnd();
+	return { body, title };
 }
 
 const PLACEHOLDER =
