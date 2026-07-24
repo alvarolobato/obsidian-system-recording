@@ -79,7 +79,8 @@ Also suggest a concise, specific title for this meeting — at most 8 words, in 
 <!--mc-title: Your Title Here-->`;
 
 /** Matches a trailing `<!--mc-title: …-->` line produced when the title suffix is requested. */
-const EMBEDDED_TITLE_RE = /<!--\s*mc-title:\s*([^>]*?)\s*-->\s*$/i;
+const EMBEDDED_TITLE_RE =
+	/(?:^|\n)[ \t]*<!--\s*mc-title:\s*([^>]*?)\s*-->[ \t]*$/i;
 
 /**
  * Splits an enrich model response into the notes body and an optional embedded
@@ -96,7 +97,7 @@ export function extractEmbeddedTitle(raw: string): {
 		return { body: trimmed, title: null };
 	}
 	const title = match[1]?.trim() || null;
-	const body = trimmed.replace(EMBEDDED_TITLE_RE, "").trimEnd();
+	const body = trimmed.slice(0, match.index).trimEnd();
 	return { body, title };
 }
 

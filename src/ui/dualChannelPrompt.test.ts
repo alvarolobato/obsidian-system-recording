@@ -187,4 +187,25 @@ describe("startDualChannelPrompt", () => {
 		expect(os.closes()).toBe(1);
 		expect(inApp.shows()).toBe(1);
 	});
+
+	it("synchronous OS failure does not retain a stale OS handle", () => {
+		const inApp = trackedInApp();
+		let closes = 0;
+		const ctrl = startDualChannelPrompt({
+			focused: false,
+			showInApp: inApp.make,
+			showOs: (fallbackToInApp) => {
+				fallbackToInApp();
+				return {
+					close: (): void => {
+						closes++;
+					},
+				};
+			},
+		});
+		expect(inApp.shows()).toBe(1);
+		expect(closes).toBe(1);
+		ctrl.dispose();
+		expect(closes).toBe(1);
+	});
 });

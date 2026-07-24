@@ -68,6 +68,7 @@ export function startDualChannelPrompt(
 	let inApp: InAppHandle | null = null;
 	let os: OsHandle | null = null;
 	let disposed = false;
+	let fellBackToInApp = false;
 
 	const ensureInApp = (): void => {
 		if (disposed || inApp) return;
@@ -77,14 +78,20 @@ export function startDualChannelPrompt(
 	if (opts.focused) {
 		inApp = opts.showInApp();
 	} else {
-		os = opts.showOs(() => {
+		const pendingOs = opts.showOs(() => {
 			// OS couldn't show — don't leave the prompt invisible.
+			fellBackToInApp = true;
 			if (os) {
 				os.close();
 				os = null;
 			}
 			ensureInApp();
 		});
+		if (fellBackToInApp) {
+			pendingOs.close();
+		} else {
+			os = pendingOs;
+		}
 	}
 
 	return {

@@ -119,6 +119,14 @@ describe("extractEmbeddedTitle", () => {
 		});
 	});
 
+	it("ignores a marker that is only inline at the end", () => {
+		const raw = `### TL;DR\n- real notes <!--mc-title: Wrong-->`;
+		expect(extractEmbeddedTitle(raw)).toEqual({
+			body: raw.trimEnd(),
+			title: null,
+		});
+	});
+
 	it("the suffix asks for the machine-readable trailer", () => {
 		expect(ADHOC_TITLE_PROMPT_SUFFIX).toContain("<!--mc-title:");
 	});
